@@ -38,12 +38,13 @@ final class CmvsScript {
         long stringsStart = bytecodeStart + bytecodeLength;
         if (bytecodeStart > source.length || stringsStart > source.length) throw new IOException("Truncated CMVS tables");
         String extension = file.getName().toLowerCase();
-        if (extension.endsWith(".ps2")) return readStringPool(source, checked(stringsStart, source.length));
+        if (extension.endsWith(".ps2")) return readStringPool(source, checked(stringsStart, source.length), textEncoding);
         return readPs3References(source, checked(bytecodeStart, source.length), bytecodeLength,
-            checked(stringsStart, source.length));
+            checked(stringsStart, source.length), textEncoding);
     }
 
-    private static List<String> readPs3References(byte[] data, int codeStart, int codeLength, int stringsStart)
+    private static List<String> readPs3References(byte[] data, int codeStart, int codeLength, int stringsStart,
+        Charset textEncoding)
         throws IOException {
         if ((long) codeStart + codeLength > data.length) throw new IOException("Truncated CMVS bytecode");
         List<String> result = new ArrayList<>();
@@ -56,11 +57,11 @@ final class CmvsScript {
                 p += 7;
             }
         }
-        if (result.isEmpty()) return readStringPool(data, stringsStart);
+        if (result.isEmpty()) return readStringPool(data, stringsStart, textEncoding);
         return result;
     }
 
-    private static List<String> readStringPool(byte[] data, int start) {
+    private static List<String> readStringPool(byte[] data, int start, Charset textEncoding) {
         List<String> result = new ArrayList<>();
         for (int p = start; p < data.length;) {
             int end = p;
