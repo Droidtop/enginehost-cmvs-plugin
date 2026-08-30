@@ -8,6 +8,8 @@ It does not yet execute general CMVS opcodes, choices, graphics, audio, CPZ
 archives, or save state. Games currently need extracted `.ps2`/`.ps3` scripts.
 Capability `ps2-ps3-dialogue` is intentionally experimental and narrow.
 
-The format work is based on the MIT-licensed `xmoezzz/CMVS-Engine` PS2 and PS3
-text dumpers. The implementation here is new bounds-checked Java code; no
-proprietary CMVS runtime or game data is included. Android builds run only in CI.
+The format work is based on the MIT-licensed
+[`xmoezzz/CMVS-Engine`](https://github.com/xmoezzz/CMVS-Engine) PS2 and PS3
+text dumpers. The implementation here is new MIT-licensed, bounds-checked Java
+code; no proprietary CMVS runtime or game data is included. Android builds run
+only in CI.
