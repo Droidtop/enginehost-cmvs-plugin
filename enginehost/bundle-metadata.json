@@ -8,13 +8,13 @@
   "dexFiles": ["classes.dex"],
   "capabilities": [
     {
-      "id": "cmvs-ps2-ps3-dialogue-experimental-v1",
+      "id": "cmvs-ps2-dialogue-experimental-v1",
       "engineContext": "ps2",
       "runtimeVersion": "1.0",
       "supportedSeries": ["2"]
     },
     {
-      "id": "cmvs-ps2-ps3-dialogue-experimental-v1",
+      "id": "cmvs-ps3-dialogue-experimental-v1",
       "engineContext": "ps3",
       "runtimeVersion": "1.0",
       "supportedSeries": ["3"]
