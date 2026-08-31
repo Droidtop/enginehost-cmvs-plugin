@@ -4,4 +4,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "enginehost-plugin-cmvs"
-include(":app")
+include(":api", ":app")
