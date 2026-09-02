@@ -26,7 +26,7 @@
       "label": "Text encoding",
       "type": "string",
       "repeats": false,
-      "description": "Character set the script text is decoded with; defaults to Shift_JIS (CmvsActivity.java:56)."
+      "description": "Character set the script text is decoded with; defaults to Shift_JIS (CmvsPlugin.java:53)."
     }
   ],
   "source": {
