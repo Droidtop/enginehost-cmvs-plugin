@@ -53,7 +53,7 @@ public final class CmvsActivity extends Activity {
 
     private Charset resolveEncoding() throws IOException {
         String name = "Shift_JIS";
-        String options = getIntent().getStringExtra("options");
+        String options = getIntent().getStringExtra("dev.enginehost.runtime.OPTIONS");
         if (options != null && !options.isBlank()) {
             try { name = new JSONObject(options).optString("textEncoding", name); }
             catch (JSONException error) { throw new IOException("CMVS options must be valid JSON", error); }
