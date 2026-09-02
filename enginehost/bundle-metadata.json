@@ -20,6 +20,15 @@
       "supportedSeries": ["3"]
     }
   ],
+  "declaredOptions": [
+    {
+      "key": "textEncoding",
+      "label": "Text encoding",
+      "type": "string",
+      "repeats": false,
+      "description": "Character set the script text is decoded with; defaults to Shift_JIS (CmvsActivity.java:56)."
+    }
+  ],
   "source": {
     "upstream": "https://github.com/xmoezzz/CMVS-Engine",
     "revision": "format-research"
