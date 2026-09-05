@@ -16,7 +16,18 @@ final class CmvsScript {
 
     static List<String> read(File file, Charset textEncoding) throws IOException {
         if (file.length() < HEADER || file.length() > MAX) throw new IOException("Unsafe CMVS script size");
-        byte[] source = Files.readAllBytes(file.toPath());
+        return read(Files.readAllBytes(file.toPath()), true, file.getName(), textEncoding);
+    }
+
+    /**
+     * Reads a PS2A script that is already in memory. A script taken out of a CPZ
+     * archive has been expanded on the way out but keeps the header fields that
+     * describe its packed form, so {@code packed} says whether the body still
+     * needs unpacking.
+     */
+    static List<String> read(byte[] source, boolean packed, String name, Charset textEncoding)
+        throws IOException {
+        if (source.length < HEADER || source.length > MAX) throw new IOException("Unsafe CMVS script size");
         if (source[0] != 'P' || source[1] != 'S' ||
             source[2] != '2' || source[3] != 'A') throw new IOException("Not a supported CMVS PS2A script");
         ByteBuffer header = ByteBuffer.wrap(source).order(ByteOrder.LITTLE_ENDIAN);
@@ -25,7 +36,7 @@ final class CmvsScript {
         int bytecodeLength = positive(header.getInt(20), "bytecode length");
         int compressed = positive(header.getInt(36), "compressed size");
         int decompressed = positive(header.getInt(40), "decompressed size");
-        if (compressed > 0) {
+        if (packed && compressed > 0) {
             if (decompressed > MAX - HEADER || HEADER + (long) compressed > source.length)
                 throw new IOException("Invalid compressed CMVS PS2 stream");
             byte[] decoded = decrypt(source, HEADER, compressed, header.getInt(12));
@@ -37,8 +48,8 @@ final class CmvsScript {
         long bytecodeStart = HEADER + indexCount * 4L;
         long stringsStart = bytecodeStart + bytecodeLength;
         if (bytecodeStart > source.length || stringsStart > source.length) throw new IOException("Truncated CMVS tables");
-        String extension = file.getName().toLowerCase();
-        if (extension.endsWith(".ps2")) return readStringPool(source, checked(stringsStart, source.length), textEncoding);
+        if (name.toLowerCase(java.util.Locale.ROOT).endsWith(".ps2"))
+            return readStringPool(source, checked(stringsStart, source.length), textEncoding);
         return readPs3References(source, checked(bytecodeStart, source.length), bytecodeLength,
             checked(stringsStart, source.length), textEncoding);
     }

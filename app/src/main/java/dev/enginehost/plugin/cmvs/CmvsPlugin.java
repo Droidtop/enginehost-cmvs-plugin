@@ -13,6 +13,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.List;
 import org.json.JSONObject;
 
@@ -26,18 +27,83 @@ public final class CmvsPlugin implements EnginePlugin {
         if (!"cmvs".equals(session.engine()) || !("ps2".equals(session.engineContext()) || "ps3".equals(session.engineContext()))) {
             throw new IOException("Unsupported CMVS context");
         }
-        view = new DialogueView(CmvsScript.read(resolveScript(), resolveEncoding()));
+        view = new DialogueView(readScript());
         session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
     }
 
-    private File resolveScript() throws IOException {
+    /**
+     * A real CMVS game keeps its scripts inside a CPZ archive, so that is where
+     * this looks first; a loose extracted script is still accepted, because
+     * that is how the reader was originally developed.
+     */
+    private List<String> readScript() throws Exception {
         File root = new File(session.gamePath()).getCanonicalFile();
         if (!root.isDirectory()) throw new IOException("CMVS game folder is unreadable");
-        String context = session.engineContext(), exec = session.execFile();
-        if (exec != null && !exec.isBlank()) return confined(root, exec, context);
-        File[] scripts = root.listFiles((dir, name) -> name.toLowerCase(java.util.Locale.ROOT).endsWith("." + context));
-        if (scripts == null || scripts.length == 0) throw new IOException("No extracted CMVS script found; set execFile");
-        Arrays.sort(scripts); return scripts[0].getCanonicalFile();
+        String context = session.engineContext();
+        String exec = session.execFile();
+        Charset encoding = resolveEncoding();
+
+        if (exec != null && !exec.isBlank() && new File(root, exec).isFile()) {
+            return CmvsScript.read(confined(root, exec, context), encoding);
+        }
+        File[] extracted = root.listFiles((dir, name) -> name.toLowerCase(Locale.ROOT).endsWith("." + context));
+        if ((exec == null || exec.isBlank()) && extracted != null && extracted.length > 0) {
+            Arrays.sort(extracted);
+            return CmvsScript.read(extracted[0].getCanonicalFile(), encoding);
+        }
+
+        File archive = scriptArchive(root);
+        try (CmvsArchive cpz = CmvsArchive.open(archive)) {
+            session.host().log(android.util.Log.INFO, "cmvs", archive.getName() + ": "
+                + cpz.names().size() + " entries, scheme " + cpz.schemeName(), null);
+            CmvsArchive.Entry entry = chooseScript(cpz, exec, context);
+            return CmvsScript.read(cpz.read(entry), false, entry.name, encoding);
+        }
+    }
+
+    /** The archive holding the scripts, under the data folder cmvs.cfg names. */
+    private File scriptArchive(File root) throws IOException {
+        File folder = new File(root, scriptFolder(root));
+        File archive = new File(folder, "script.cpz");
+        if (!archive.isFile()) {
+            throw new IOException("No CMVS script archive at " + folder.getName() + "/script.cpz");
+        }
+        return archive;
+    }
+
+    /** SCRIPT_INIT_PATH from cmvs.cfg, which every CMVS game ships; data/pack otherwise. */
+    private String scriptFolder(File root) {
+        File config = new File(root, "cmvs.cfg");
+        if (config.isFile() && config.length() < 1024 * 1024) {
+            try {
+                for (String line : java.nio.file.Files.readAllLines(config.toPath(), Charset.forName("Shift_JIS"))) {
+                    String trimmed = line.trim();
+                    if (trimmed.toUpperCase(Locale.ROOT).startsWith("SCRIPT_INIT_PATH=")) {
+                        String value = trimmed.substring("SCRIPT_INIT_PATH=".length()).trim().replace('\\', '/');
+                        while (value.endsWith("/")) value = value.substring(0, value.length() - 1);
+                        if (!value.isEmpty() && !value.startsWith("/") && !value.contains("..")) return value;
+                    }
+                }
+            } catch (Exception unreadable) {
+                session.host().log(android.util.Log.WARN, "cmvs", "Ignoring unreadable cmvs.cfg", unreadable);
+            }
+        }
+        return "data/pack";
+    }
+
+    /** execFile may name an entry inside the archive; otherwise the game's own main script. */
+    private CmvsArchive.Entry chooseScript(CmvsArchive cpz, String exec, String context) throws IOException {
+        if (exec != null && !exec.isBlank()) {
+            CmvsArchive.Entry named = cpz.find(exec);
+            if (named == null) throw new IOException("No script named " + exec + " in the CMVS archive");
+            return named;
+        }
+        CmvsArchive.Entry main = cpz.find("code/main." + context);
+        if (main != null) return main;
+        for (String name : cpz.names()) {
+            if (name.endsWith("." + context)) return cpz.find(name);
+        }
+        throw new IOException("The CMVS script archive holds no ." + context + " script");
     }
 
     private File confined(File root, String relative, String context) throws IOException {
