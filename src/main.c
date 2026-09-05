@@ -8,6 +8,7 @@
  *   cmvs <game folder>                       list what the archives hold
  *   cmvs <game folder> --check               decode a sample of every image
  *   cmvs <game folder> --show <entry>        open a window on one image
+ *   cmvs <game folder> --run [script] [-v]   run the bytecode from start.ps3
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,8 @@
 #include <SDL.h>
 
 #include "cpz.h"
+#include "game.h"
+#include "interp.h"
 #include "pb3.h"
 #include "script.h"
 #include "vm.h"
@@ -295,6 +298,37 @@ static int cmd_png(const char *game, const char *wanted, const char *out_path)
     return rc != 0;
 }
 
+
+/* Runs the bytecode. This is the milestone the engine is built towards: the
+ * boot script executing far enough that the commands it calls are the real
+ * work list for what to implement next. */
+static int cmd_run(const char *folder, const char *script, int trace, long budget)
+{
+    char err[256] = {0};
+    cmvs_game *g = cmvs_game_open(folder, err, sizeof err);
+    cmvs_interp *in;
+    int rc, kinds = 0, missing;
+
+    if (!g) { fprintf(stderr, "%s\n", err); return 1; }
+    in = cmvs_interp_new(g);
+    if (!in) { cmvs_game_close(g); return 1; }
+    cmvs_interp_trace(in, trace);
+    if (!cmvs_interp_boot(in, script, err, sizeof err)) {
+        fprintf(stderr, "%s: %s\n", script, err);
+        cmvs_interp_free(in);
+        cmvs_game_close(g);
+        return 1;
+    }
+    rc = cmvs_interp_step(in, budget, err, sizeof err);
+    if (rc < 0) fprintf(stderr, "stopped: %s\n", err);
+    cmvs_interp_report(in, stdout);
+    missing = cmvs_interp_unimplemented(in, &kinds);
+    printf("%d calls to %d commands that are not implemented yet\n", missing, kinds);
+    cmvs_interp_free(in);
+    cmvs_game_close(g);
+    return rc < 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -308,6 +342,18 @@ int main(int argc, char **argv)
     }
     if (argc >= 3 && !strcmp(argv[2], "--scripts")) {
         return cmd_scripts(argv[1], argc >= 4 ? argv[3] : NULL);
+    }
+    if (argc >= 3 && !strcmp(argv[2], "--run")) {
+        const char *script = "start.ps3";
+        int trace = 0, i;
+        long budget = 2000000;
+        for (i = 3; i < argc; i++) {
+            if (!strcmp(argv[i], "-v")) trace = 1;
+            else if (!strcmp(argv[i], "-vv")) trace = 2;
+            else if (!strcmp(argv[i], "-n") && i + 1 < argc) budget = atol(argv[++i]);
+            else script = argv[i];
+        }
+        return cmd_run(argv[1], script, trace, budget);
     }
     if (argc >= 4 && !strcmp(argv[2], "--show")) return cmd_show(argv[1], argv[3]);
     if (argc >= 5 && !strcmp(argv[2], "--bmp")) return cmd_png(argv[1], argv[3], argv[4]);

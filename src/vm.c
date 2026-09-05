@@ -31,17 +31,15 @@ static uint32_t dword_at(const cmvs_script *s, int at)
  * word, so a sub-expression costs 2 bytes of opener plus its tokens plus its
  * own 0x020F.
  */
-typedef enum { GRAMMAR_200, GRAMMAR_201, GRAMMAR_202 } cmvs_grammar;
-
 static int in_range(int t, int lo, int hi) { return t >= lo && t <= hi; }
 
 /* Fills the length in bytes and whether a nested expression follows. */
-static void token_shape(cmvs_grammar g, int t, int *len, int *nested)
+void cmvs_token_shape(cmvs_grammar g, int t, int *len, int *nested)
 {
     *len = 6;       /* the default handler of all three grammars advances 6 */
     *nested = 0;
 
-    if (g == GRAMMAR_201) {
+    if (g == CMVS_GRAMMAR_201) {
         /* 0x459844: only 0x121..0x172 are in the table at all. */
         if (t == 0x121) { *len = 2; *nested = 1; return; }   /* 0x4598fb: add eax, 2 */
         if (in_range(t, 0x160, 0x172)) { *len = 2; return; }
@@ -57,7 +55,7 @@ static void token_shape(cmvs_grammar g, int t, int *len, int *nested)
         || t == 0x12D || t == 0x12F) { *nested = 1; return; }
     if (in_range(t, 0x160, 0x17E)) { *len = 2; return; }
 
-    if (g == GRAMMAR_202) {
+    if (g == CMVS_GRAMMAR_202) {
         /* The float grammar keeps six more assignment targets of its own. */
         if (t == 0x131 || t == 0x133 || t == 0x135 || t == 0x137) { *len = 8; *nested = 1; return; }
         if (t == 0x134 || t == 0x136) { *nested = 1; return; }
@@ -85,8 +83,8 @@ static int parse_expression(const cmvs_script *s, cmvs_grammar g, int at, int de
         /* 0x458f4f: only the 0x0200 grammar and its float twin open a nested
          * expression on a bare 0x0200; in the 0x0201 grammar it is out of table
          * range and takes the default six bytes. */
-        if (t == 0x0200 && g != GRAMMAR_201) {
-            at = parse_expression(s, GRAMMAR_200, at + 2, depth + 1, strings);
+        if (t == 0x0200 && g != CMVS_GRAMMAR_201) {
+            at = parse_expression(s, CMVS_GRAMMAR_200, at + 2, depth + 1, strings);
             if (at < 0) return -1;
             continue;
         }
@@ -95,10 +93,10 @@ static int parse_expression(const cmvs_script *s, cmvs_grammar g, int at, int de
                 strings->at[strings->count] = dword_at(s, at + 2);
             strings->count++;
         }
-        token_shape(g, t, &len, &nested);
+        cmvs_token_shape(g, t, &len, &nested);
         at += len;
         if (nested) {
-            at = parse_expression(s, GRAMMAR_200, at + 2, depth + 1, strings);
+            at = parse_expression(s, CMVS_GRAMMAR_200, at + 2, depth + 1, strings);
             if (at < 0) return -1;
         }
         if (at > s->code_size) return -1;
@@ -127,6 +125,11 @@ static int control_length(int op)
     }
 }
 
+int cmvs_expression_end(const cmvs_script *s, cmvs_grammar g, int at)
+{
+    return parse_expression(s, g, at, 0, NULL);
+}
+
 int cmvs_decode(const cmvs_script *s, int pc, cmvs_statement *out)
 {
     int op = word_at(s, pc);
@@ -135,8 +138,8 @@ int cmvs_decode(const cmvs_script *s, int pc, cmvs_statement *out)
     out->op = op;
 
     if (op == 0x0200 || op == 0x0201 || op == 0x0202) {
-        cmvs_grammar g = op == 0x0200 ? GRAMMAR_200
-                       : op == 0x0201 ? GRAMMAR_201 : GRAMMAR_202;
+        cmvs_grammar g = op == 0x0200 ? CMVS_GRAMMAR_200
+                       : op == 0x0201 ? CMVS_GRAMMAR_201 : CMVS_GRAMMAR_202;
         cmvs_expr_strings found;
         int end;
         memset(&found, 0, sizeof found);

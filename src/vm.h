@@ -43,6 +43,21 @@ typedef struct {
     uint32_t string_at[8];  /* their string-pool offsets, for a listing */
 } cmvs_statement;
 
+/*
+ * The three statement opcodes that open an expression each parse it with their
+ * own token grammar. The interpreter needs the same tables the decoder uses, so
+ * they are shared rather than written twice.
+ */
+typedef enum { CMVS_GRAMMAR_200, CMVS_GRAMMAR_201, CMVS_GRAMMAR_202 } cmvs_grammar;
+
+/* Length in bytes of one expression token, and whether a nested expression
+ * follows it. */
+void cmvs_token_shape(cmvs_grammar g, int token, int *len, int *nested);
+
+/* The offset just past the 0x020F that closes the expression whose first token
+ * is at `at`, or -1 if the stream runs out. */
+int cmvs_expression_end(const cmvs_script *s, cmvs_grammar g, int at);
+
 /* Decodes the statement at `pc`. Returns 0 if it runs off the end. */
 int cmvs_decode(const cmvs_script *s, int pc, cmvs_statement *out);
 
