@@ -17,6 +17,8 @@
 
 #include "cpz.h"
 #include "pb3.h"
+#include "script.h"
+#include "vm.h"
 
 static const char *ARCHIVES[] = {
     "ps.cpz", "script.cpz", "bg.cpz", "chip.cpz", "balloon.cpz",
@@ -143,6 +145,55 @@ static int cmd_check(const char *game, int per_archive)
     return failed ? 1 : 0;
 }
 
+/* Decodes every script and reports whether the instruction set holds up. */
+static int cmd_scripts(const char *game, const char *listing)
+{
+    char path[4096], err[256] = {0};
+    cpz_archive *a;
+    int k, n, clean = 0, total = 0;
+    long statements = 0, commands = 0, expressions = 0, unknown = 0, strings = 0;
+
+    snprintf(path, sizeof path, "%s/data/pack/script.cpz", game);
+    a = cpz_open(path, err, sizeof err);
+    if (!a) { fprintf(stderr, "script.cpz: %s\n", err); return 1; }
+    n = cpz_count(a);
+    for (k = 0; k < n; k++) {
+        const cpz_entry *e = cpz_at(a, k);
+        cmvs_script script;
+        cmvs_walk_stats st;
+        uint8_t *data;
+        int size = 0, ok;
+        data = cpz_read(a, e, &size, err, sizeof err);
+        if (!data) { printf("%-24s read: %s\n", e->name, err); continue; }
+        if (!cmvs_script_open(data, size, &script, err, sizeof err)) {
+            printf("%-24s %s\n", e->name, err);
+            free(data);
+            continue;
+        }
+        total++;
+        ok = cmvs_walk(&script, &st);
+        clean += ok;
+        statements += st.statements;
+        commands += st.commands;
+        expressions += st.expressions;
+        unknown += st.unknown;
+        strings += st.strings;
+        if (!ok) {
+            printf("%-24s %d statements, %d unknown", e->name, st.statements, st.unknown);
+            if (st.first_unknown_pc >= 0)
+                printf(", first 0x%04x at %06x", st.first_unknown_op, st.first_unknown_pc);
+            printf("\n");
+        }
+        if (listing && !strcmp(listing, e->name)) cmvs_disassemble(&script, 40, stdout);
+        cmvs_script_close(&script);
+    }
+    cpz_close(a);
+    printf("\n%d/%d scripts decoded to the exact end with no unknown opcode\n", clean, total);
+    printf("%ld statements: %ld expressions, %ld commands, %ld unknown; %ld string references\n",
+           statements, expressions, commands, unknown, strings);
+    return clean == total ? 0 : 1;
+}
+
 static int cmd_show(const char *game, const char *wanted)
 {
     char path[4096];
@@ -254,6 +305,9 @@ int main(int argc, char **argv)
     }
     if (argc >= 3 && !strcmp(argv[2], "--check")) {
         return cmd_check(argv[1], argc >= 4 ? atoi(argv[3]) : 40);
+    }
+    if (argc >= 3 && !strcmp(argv[2], "--scripts")) {
+        return cmd_scripts(argv[1], argc >= 4 ? argv[3] : NULL);
     }
     if (argc >= 4 && !strcmp(argv[2], "--show")) return cmd_show(argv[1], argv[3]);
     if (argc >= 5 && !strcmp(argv[2], "--bmp")) return cmd_png(argv[1], argv[3], argv[4]);
