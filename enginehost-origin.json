@@ -1,0 +1,14 @@
+{
+  "description": "Enginehost plugin implementation repository for CMVS",
+  "engine": "cmvs",
+  "engineContexts": [
+    "ps2",
+    "ps3"
+  ],
+  "formatVersion": 1,
+  "implementation": {
+    "id": "enginehost-native",
+    "name": "Enginehost native"
+  },
+  "origin": "https://github.com/droidtop/enginehost-cmvs-plugin"
+}
