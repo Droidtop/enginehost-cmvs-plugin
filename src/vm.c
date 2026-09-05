@@ -16,38 +16,91 @@ static uint32_t dword_at(const cmvs_script *s, int at)
 }
 
 /*
- * How far the expression parser advances over one token. Read off the handler
- * table at 0x459658: the groups that take a 32-bit operand advance 6, the two
- * that take a word plus a dword advance 8, and the bare operator tokens 2. The
- * fallback handler at 0x4595a3 - which also serves every token above 0x200,
- * that is the 0x04xx variable family - advances 6.
+ * The three statement opcodes that open an expression each parse it with their
+ * OWN token grammar, and the grammars differ in both length and shape. Reading
+ * one grammar for all three is what desynchronised the earlier decoder.
+ *
+ *   0x0200  parser 0x458eb0, group table 0x45969C -> handlers 0x459658
+ *   0x0201  parser 0x459790, group table 0x459A34 -> handlers 0x459A24
+ *   0x0202  parser 0x459AB0, group table 0x45A7E4 -> handlers 0x45A784
+ *
+ * Each handler advances the pc by a fixed amount, and some of them then call
+ * the 0x0200 parser on what follows - those tokens are the assignment targets,
+ * so a token can be followed by a whole nested expression. The nested call is
+ * made with the pc already past the token and the parser itself skips one more
+ * word, so a sub-expression costs 2 bytes of opener plus its tokens plus its
+ * own 0x020F.
  */
-static int token_length(int t)
+typedef enum { GRAMMAR_200, GRAMMAR_201, GRAMMAR_202 } cmvs_grammar;
+
+static int in_range(int t, int lo, int hi) { return t >= lo && t <= hi; }
+
+/* Fills the length in bytes and whether a nested expression follows. */
+static void token_shape(cmvs_grammar g, int t, int *len, int *nested)
 {
-    if (t == 0x101 || t == 0x102 || t == 0x12B) return 2;    /* g0  */
-    if (t == 0x107 || t == 0x10B || t == 0x111 || t == 0x113) return 8;  /* g2 g4 g6 g8 */
+    *len = 6;       /* the default handler of all three grammars advances 6 */
+    *nested = 0;
+
+    if (g == GRAMMAR_201) {
+        /* 0x459844: only 0x121..0x172 are in the table at all. */
+        if (t == 0x121) { *len = 2; *nested = 1; return; }   /* 0x4598fb: add eax, 2 */
+        if (in_range(t, 0x160, 0x172)) { *len = 2; return; }
+        return;
+    }
+
+    /* 0x458f55 / 0x459b68: t - 0x101 bounds checked against 0x7D. */
+    if (!in_range(t, 0x101, 0x17E)) return;
+
+    if (t == 0x101 || t == 0x102 || t == 0x12B) { *len = 2; *nested = 1; return; }
+    if (t == 0x107 || t == 0x10B || t == 0x111 || t == 0x113) { *len = 8; *nested = 1; return; }
     if (t == 0x105 || t == 0x109 || t == 0x110 || t == 0x112
-        || t == 0x12A || t == 0x12D || t == 0x12F) return 6; /* g1 g3 g5 g7 g9 g10 g11 */
-    if (t >= 0x160 && t <= 0x17E) return 2;                  /* g12..g15 operators */
-    return 6;                                                /* g16 and the 0x04xx family */
+        || t == 0x12D || t == 0x12F) { *nested = 1; return; }
+    if (in_range(t, 0x160, 0x17E)) { *len = 2; return; }
+
+    if (g == GRAMMAR_202) {
+        /* The float grammar keeps six more assignment targets of its own. */
+        if (t == 0x131 || t == 0x133 || t == 0x135 || t == 0x137) { *len = 8; *nested = 1; return; }
+        if (t == 0x134 || t == 0x136) { *nested = 1; return; }
+    }
 }
 
-/* Parses one expression, which the caller has already stepped past the opening
- * word of. Returns the offset just past its 0x020F terminator, or -1. */
-static int parse_expression(const cmvs_script *s, int at, int depth, int *strings)
+/*
+ * Parses one expression in grammar `g`, from the first token (the caller has
+ * already stepped past the opening word). Returns the offset just past the
+ * 0x020F terminator, or -1.
+ */
+typedef struct {
+    int count;              /* string operands seen */
+    uint32_t at[8];         /* the first few, for a listing */
+} cmvs_expr_strings;
+
+static int parse_expression(const cmvs_script *s, cmvs_grammar g, int at, int depth,
+                            cmvs_expr_strings *strings)
 {
-    if (depth > 32) return -1;
+    if (depth > 64) return -1;
     for (;;) {
-        int t = word_at(s, at);
+        int t = word_at(s, at), len, nested;
         if (t < 0) return -1;
         if (t == 0x020F) return at + 2;
-        if (t == 0x0200 || t == 0x0201 || t == 0x0202) {
-            at = parse_expression(s, at + 2, depth + 1, strings);
+        /* 0x458f4f: only the 0x0200 grammar and its float twin open a nested
+         * expression on a bare 0x0200; in the 0x0201 grammar it is out of table
+         * range and takes the default six bytes. */
+        if (t == 0x0200 && g != GRAMMAR_201) {
+            at = parse_expression(s, GRAMMAR_200, at + 2, depth + 1, strings);
             if (at < 0) return -1;
             continue;
         }
-        if (t == 0x0120 && strings) (*strings)++;
-        at += token_length(t);
+        if (t == 0x0120 && strings && at + 6 <= s->code_size) {
+            if (strings->count < (int) (sizeof strings->at / sizeof strings->at[0]))
+                strings->at[strings->count] = dword_at(s, at + 2);
+            strings->count++;
+        }
+        token_shape(g, t, &len, &nested);
+        at += len;
+        if (nested) {
+            at = parse_expression(s, GRAMMAR_200, at + 2, depth + 1, strings);
+            if (at < 0) return -1;
+        }
         if (at > s->code_size) return -1;
     }
 }
@@ -62,8 +115,13 @@ static int control_length(int op)
     switch (op) {
     case 0x401: case 0x402: return 6;
     case 0x403: return 10;
-    case 0x405: case 0x407: case 0x410: case 0x411: case 0x412: return 4;
-    case 0x413: case 0x414: case 0x416: case 0x430: return 2;
+    case 0x405: case 0x410: case 0x411: case 0x412: return 4;
+    /* 0x413 and 0x414 are returns: the pc comes off the call stack, so the
+     * handler never reveals a fall-through length. The stream always pairs them
+     * with an unused word (0x0414 0x0000), which is what the compiler emits. */
+    case 0x413: case 0x414: return 4;
+    case 0x407: return 10;   /* 0x45aa2c reads a dword at +6 */
+    case 0x416: case 0x430: return 2;
     case 0x440: case 0x442: return 8;
     default: return 2;   /* falls through to the command path */
     }
@@ -77,10 +135,19 @@ int cmvs_decode(const cmvs_script *s, int pc, cmvs_statement *out)
     out->op = op;
 
     if (op == 0x0200 || op == 0x0201 || op == 0x0202) {
-        int end = parse_expression(s, pc + 2, 0, &out->strings);
+        cmvs_grammar g = op == 0x0200 ? GRAMMAR_200
+                       : op == 0x0201 ? GRAMMAR_201 : GRAMMAR_202;
+        cmvs_expr_strings found;
+        int end;
+        memset(&found, 0, sizeof found);
+        end = parse_expression(s, g, pc + 2, 0, &found);
         if (end < 0) return 0;
         out->kind = CMVS_ST_EXPRESSION;
         out->length = end - pc;
+        out->strings = found.count;
+        memcpy(out->string_at, found.at, sizeof out->string_at);
+        out->string_shown = found.count < (int) (sizeof found.at / sizeof found.at[0])
+                          ? found.count : (int) (sizeof found.at / sizeof found.at[0]);
         return 1;
     }
     if (op == 0x0400) {
@@ -149,23 +216,13 @@ void cmvs_disassemble(const cmvs_script *s, int limit, void *out)
             fprintf(f, "%06x  ctl  0x%03x (%d bytes)\n", pc, st.op, st.length);
             break;
         case CMVS_ST_EXPRESSION: {
-            /* Show the strings the expression names; that is the readable part. */
-            int at = pc + 2, shown = 0;
+            int i;
             fprintf(f, "%06x  expr 0x%03x (%d bytes)", pc, st.op, st.length);
-            while (at < pc + st.length - 2) {
-                int t = word_at(s, at);
-                if (t < 0) break;
-                if (t == 0x0120 && at + 6 <= s->code_size) {
-                    const char *text = cmvs_script_string(s, dword_at(s, at + 2));
-                    if (text && *text && shown < 3) {
-                        fprintf(f, "%s \"%s\"", shown ? "," : "  ", text);
-                        shown++;
-                    }
-                }
-                if (t == 0x0200 || t == 0x0201 || t == 0x0202) at += 2;
-                else at += token_length(t);
+            for (i = 0; i < st.string_shown && i < 3; i++) {
+                const char *text = cmvs_script_string(s, st.string_at[i]);
+                if (text && *text) fprintf(f, "%s \"%s\"", i ? "," : "  ", text);
             }
-            fputc('\n', f);
+            fputc(0x0A, f);
             break;
         }
         default:

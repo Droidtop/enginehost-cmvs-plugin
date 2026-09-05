@@ -39,6 +39,8 @@ typedef struct {
     int command;    /* for CMVS_ST_COMMAND, op & 0x7FF */
     int length;     /* bytes this statement occupies */
     int strings;    /* string references seen inside its expression */
+    int string_shown;       /* how many of the offsets below were recorded */
+    uint32_t string_at[8];  /* their string-pool offsets, for a listing */
 } cmvs_statement;
 
 /* Decodes the statement at `pc`. Returns 0 if it runs off the end. */
