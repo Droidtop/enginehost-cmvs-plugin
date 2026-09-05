@@ -18,6 +18,11 @@ typedef struct {
     const uint8_t *code;
     int code_size;
 
+    /* Header 0x20: where the engine starts this script (0x46EF20 does
+     * `mov eax,[eax+0x20]; mov [esi+0x3394],eax`). It is NOT index[0]:
+     * main.ps3 starts at 0x377e8 and index[0] is 0, a different routine. */
+    int entry;
+
     const char *strings;    /* cp932, NUL separated */
     int strings_size;
 } cmvs_script;

@@ -8,7 +8,7 @@
  *   cmvs <game folder>                       list what the archives hold
  *   cmvs <game folder> --check               decode a sample of every image
  *   cmvs <game folder> --show <entry>        open a window on one image
- *   cmvs <game folder> --run [script] [-v]   run the bytecode from start.ps3
+ *   cmvs <game folder> --run [script] [-v] [-f frames]   run the bytecode
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -302,12 +302,12 @@ static int cmd_png(const char *game, const char *wanted, const char *out_path)
 /* Runs the bytecode. This is the milestone the engine is built towards: the
  * boot script executing far enough that the commands it calls are the real
  * work list for what to implement next. */
-static int cmd_run(const char *folder, const char *script, int trace, long budget)
+static int cmd_run(const char *folder, const char *script, int trace, long budget, int frames)
 {
     char err[256] = {0};
     cmvs_game *g = cmvs_game_open(folder, err, sizeof err);
     cmvs_interp *in;
-    int rc, kinds = 0, missing;
+    int rc = 1, kinds = 0, missing, frame;
 
     if (!g) { fprintf(stderr, "%s\n", err); return 1; }
     in = cmvs_interp_new(g);
@@ -319,7 +319,11 @@ static int cmd_run(const char *folder, const char *script, int trace, long budge
         cmvs_game_close(g);
         return 1;
     }
-    rc = cmvs_interp_step(in, budget, err, sizeof err);
+    /* The engine's own outer loop, at 0x0040CCCD: once round per frame. */
+    for (frame = 0; frame < frames && rc > 0; frame++) {
+        rc = cmvs_interp_frame(in, budget, err, sizeof err);
+        if (trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_interp_script(in));
+    }
     if (rc < 0) fprintf(stderr, "stopped: %s\n", err);
     cmvs_interp_report(in, stdout);
     missing = cmvs_interp_unimplemented(in, &kinds);
@@ -345,15 +349,16 @@ int main(int argc, char **argv)
     }
     if (argc >= 3 && !strcmp(argv[2], "--run")) {
         const char *script = "start.ps3";
-        int trace = 0, i;
+        int trace = 0, i, frames = 60;
         long budget = 2000000;
         for (i = 3; i < argc; i++) {
             if (!strcmp(argv[i], "-v")) trace = 1;
             else if (!strcmp(argv[i], "-vv")) trace = 2;
             else if (!strcmp(argv[i], "-n") && i + 1 < argc) budget = atol(argv[++i]);
+            else if (!strcmp(argv[i], "-f") && i + 1 < argc) frames = atoi(argv[++i]);
             else script = argv[i];
         }
-        return cmd_run(argv[1], script, trace, budget);
+        return cmd_run(argv[1], script, trace, budget, frames);
     }
     if (argc >= 4 && !strcmp(argv[2], "--show")) return cmd_show(argv[1], argv[3]);
     if (argc >= 5 && !strcmp(argv[2], "--bmp")) return cmd_png(argv[1], argv[3], argv[4]);

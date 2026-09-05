@@ -35,6 +35,13 @@ struct cmvs_interp {
     int frame[MAX_DEPTH];        /* +0x13c28 */
     int depth;                   /* +0x13d28 */
 
+    /* The ten millisecond timers at +0x339c. 0x0045A8E0 adds the frame's
+     * elapsed time to all ten every time the engine calls the interpreter,
+     * command 0x00B resets one and command 0x00C reads one into sys[0]. That
+     * is how every wait in the game is written. */
+    int32_t timer[10];
+    int frame_ms;
+
     int32_t acc;                 /* +0x13d30 */
     int flag;                    /* +0x13d2c bit 0 */
     int32_t sys[16];             /* +0x13d34 onwards, what token 0x10F reads */
@@ -42,10 +49,9 @@ struct cmvs_interp {
     int32_t globals[GLOBALS];
     uint8_t flags[FLAGS / 8];
 
-    int running;
+    int running;       /* still executing this frame */
+    int alive;         /* the script has not run off its end */
     int trace;
-    char main_script[128];
-    int main_started;
     long statements;
     int command_seen[COMMANDS];
     int command_known[COMMANDS];
@@ -62,6 +68,7 @@ cmvs_interp *cmvs_interp_new(cmvs_game *game)
     if (!in) return NULL;
     in->game = game;
     in->current = -1;
+    in->frame_ms = 16;
     return in;
 }
 
@@ -410,8 +417,9 @@ static const char *as_string(cmvs_interp *in, int32_t v)
  */
 static int command_boot(cmvs_interp *in, int command);
 static int load_slot(cmvs_interp *in, int slot, const char *name, char *err, size_t errlen);
+static int enter_script(cmvs_interp *in, const char *name, char *err, size_t errlen);
 
-static void do_command(cmvs_interp *in, int command)
+static int do_command(cmvs_interp *in, int command)
 {
     if (command >= 0 && command < COMMANDS) in->command_seen[command]++;
     if (in->trace) {
@@ -428,11 +436,12 @@ static void do_command(cmvs_interp *in, int command)
         int flags = command_boot(in, command);
         if (abi < 0) abi = CMVS_CMD_ADVANCE;   /* extractor gap; see commands.c */
         flags |= abi;
-        /* The pc step and the argument pop are the engine own bookkeeping at
-         * 0x45AC55, done whether or not the command itself is implemented. */
+        /* The argument pop is the engine's own bookkeeping at 0x45AC55, done
+         * whether or not the command itself is implemented. */
         in->sp -= CMVS_CMD_ARGS(flags);
-        if (in->sp < 4) in->sp = 4;
+        if (in->sp < 0) in->sp = 0;
         if (flags & CMVS_CMD_STOP) in->running = 0;
+        return flags;
     }
 }
 
@@ -454,10 +463,36 @@ static int command_boot(cmvs_interp *in, int command)
     switch (command) {
     case 0x000:
         return CMVS_CMD_STOP;
-    case 0x080:
-        if (name) snprintf(in->main_script, sizeof in->main_script, "%s", name);
+    case 0x00B: {   /* 0x0045E750: timer[arg] = 0 */
+        int32_t t = arg(in, 1, 0);
+        if (t >= 0 && t < 10) in->timer[t] = 0;
         in->command_known[command] = 1;
         return 0;
+    }
+    case 0x00C: {   /* 0x0045E780: sys[0] = timer[arg] */
+        int32_t t = arg(in, 1, 0);
+        in->sys[0] = (t >= 0 && t < 10) ? in->timer[t] : 0;
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x080: {
+        /* 0x0046FA90: read the name, load it over slot 0 (0x0046EF20 sets
+         * +0x3390 to 0, the pc to the script's own header entry at 0x20 and
+         * the stack, depth and frame pointer to zero), then compose a frame.
+         * It returns 0: no advance, because the pc now belongs to the new
+         * script. This is how start.ps3 reaches main.ps3 and main.ps3 reaches
+         * logo.ps3 - it is a jump between scripts, not a call. */
+        char why[256];
+        char wanted[128];
+        if (!name) return 0;
+        snprintf(wanted, sizeof wanted, "%s", name);
+        if (!enter_script(in, wanted, why, sizeof why)) {
+            if (in->trace) fprintf(stderr, "  cannot enter %s: %s\n", wanted, why);
+            return CMVS_CMD_ADVANCE;
+        }
+        in->command_known[command] = 1;
+        return 0;
+    }
     case 0x081: {
         int slot;
         char why[256];
@@ -488,48 +523,46 @@ static int load_slot(cmvs_interp *in, int slot, const char *name, char *err, siz
     return 1;
 }
 
+/*
+ * Enters a script the way 0x0046EF20 does: over slot 0, at the entry the
+ * script's own header carries at 0x20, with an empty stack and no call depth.
+ */
+static int enter_script(cmvs_interp *in, const char *name, char *err, size_t errlen)
+{
+    if (!load_slot(in, 0, name, err, errlen)) return 0;
+    in->current = 0;
+    in->pc = in->slot[0].script.entry;
+    in->sp = 0;
+    in->depth = 0;
+    in->frame[0] = 0;
+    in->running = 1;
+    in->alive = 1;
+    return 1;
+}
+
 int cmvs_interp_boot(cmvs_interp *in, const char *script, char *err, size_t errlen)
 {
-    if (!load_slot(in, 0, script, err, errlen)) return 0;
-    in->current = 0;
-    in->pc = in->slot[0].script.index_count > 0 ? (int) in->slot[0].script.index[0] : 0;
-    in->sp = 4;
-    in->depth = 0;
-    in->frame[0] = in->sp;
-    in->running = 1;
-    return 1;
+    return enter_script(in, script, err, errlen);
 }
 
-/*
- * start.ps3 ends by yielding, having named the script the engine runs next.
- * That hand-over is the engine outer loop, not something the desktop runner
- * should have to know, so the interpreter does it here.
- */
-static int start_main_script(cmvs_interp *in, char *err, size_t errlen)
+const char *cmvs_interp_script(const cmvs_interp *in)
 {
-    int slot;
-    for (slot = 1; slot < MAX_SLOTS; slot++) if (!in->slot[slot].loaded) break;
-    if (slot >= MAX_SLOTS || !load_slot(in, slot, in->main_script, err, errlen)) return 0;
-    in->main_started = 1;
-    in->current = slot;
-    in->pc = in->slot[slot].script.index_count > 0 ? (int) in->slot[slot].script.index[0] : 0;
-    in->sp = 4;
-    in->depth = 0;
-    in->frame[0] = in->sp;
-    in->running = 1;
-    return 1;
+    return in->current >= 0 ? in->slot[in->current].name : "(none)";
 }
 
-int cmvs_interp_step(cmvs_interp *in, long budget, char *err, size_t errlen)
+void cmvs_interp_frame_ms(cmvs_interp *in, int ms) { in->frame_ms = ms; }
+
+int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
 {
-    while (budget-- > 0) {
-        int op;
-        if (!in->running) {
-            if (in->main_started || !in->main_script[0]) break;
-            if (!start_main_script(in, err, errlen)) return -1;
-        }
-        op = word_at(in, in->pc);
-        if (op < 0) { in->running = 0; continue; }
+    int t;
+    if (!in->alive) return 0;
+    /* 0x0045A8E0 opens with exactly this: ten timers, each advanced by the
+     * frame's elapsed time before a single statement runs. */
+    for (t = 0; t < 10; t++) in->timer[t] += in->frame_ms;
+    in->running = 1;
+    while (in->running && budget-- > 0) {
+        int op = word_at(in, in->pc);
+        if (op < 0) { in->running = 0; in->alive = 0; continue; }
         in->statements++;
         if (in->trace > 1)
             fprintf(stderr, "%-12s %06x op %04x sp=%-6d depth=%-3d acc=%d\n",
@@ -550,8 +583,11 @@ int cmvs_interp_step(cmvs_interp *in, long budget, char *err, size_t errlen)
             continue;
         }
         if (op >= 0x2000 && op <= 0x27FF) {
-            do_command(in, op & 0x7FF);
-            in->pc += 2;
+            int flags = do_command(in, op & 0x7FF);
+            /* Bit 0x4000 is the handler saying "step past me". A command that
+             * does not set it has moved the pc itself - 0x080 jumps into
+             * another script - so advancing here would skip its first word. */
+            if (flags & CMVS_CMD_ADVANCE) in->pc += 2;
             continue;
         }
         switch (op) {
@@ -615,9 +651,9 @@ int cmvs_interp_step(cmvs_interp *in, long budget, char *err, size_t errlen)
             in->pc += 2;   /* the engine skips any word its tables do not match */
             break;
         }
-        if (in->pc < 0 || in->pc >= code(in)->code_size) in->running = 0;
+        if (in->pc < 0 || in->pc >= code(in)->code_size) { in->running = 0; in->alive = 0; }
     }
-    return in->running;
+    return in->alive;
 }
 
 int cmvs_interp_unimplemented(const cmvs_interp *in, int *distinct)
