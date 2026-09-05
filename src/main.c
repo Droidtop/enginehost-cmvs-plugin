@@ -18,10 +18,9 @@
 
 #include "cpz.h"
 #include "game.h"
-#include "interp.h"
 #include "pb3.h"
 #include "png.h"
-#include "scene.h"
+#include "session.h"
 #include "script.h"
 #include "vm.h"
 
@@ -301,48 +300,40 @@ static int cmd_png(const char *game, const char *wanted, const char *out_path)
 }
 
 
-/* Runs the bytecode. This is the milestone the engine is built towards: the
- * boot script executing far enough that the commands it calls are the real
- * work list for what to implement next. */
+/*
+ * Runs the bytecode. Everything here goes through one session, which is also
+ * what the Android wrapper drives, so there is one way to start a game and the
+ * desktop is not a second engine.
+ */
 static int cmd_run(const char *folder, const char *script, int trace, long budget,
                    int frames, const char *shot)
 {
     char err[256] = {0};
-    cmvs_game *g = cmvs_game_open(folder, err, sizeof err);
-    cmvs_interp *in;
+    cmvs_session *s = cmvs_session_open(folder, script, err, sizeof err);
     int rc = 1, kinds = 0, missing, frame;
 
-    if (!g) { fprintf(stderr, "%s\n", err); return 1; }
-    in = cmvs_interp_new(g);
-    if (!in) { cmvs_game_close(g); return 1; }
-    cmvs_interp_trace(in, trace);
-    if (!cmvs_interp_boot(in, script, err, sizeof err)) {
-        fprintf(stderr, "%s: %s\n", script, err);
-        cmvs_interp_free(in);
-        cmvs_game_close(g);
-        return 1;
-    }
+    if (!s) { fprintf(stderr, "%s\n", err); return 1; }
+    cmvs_session_trace(s, trace);
+    cmvs_session_budget(s, budget);
     /* The engine's own outer loop, at 0x0040CCCD: once round per frame. */
     for (frame = 0; frame < frames && rc > 0; frame++) {
-        rc = cmvs_interp_frame(in, budget, err, sizeof err);
-        if (trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_interp_script(in));
+        rc = cmvs_session_frame(s, err, sizeof err);
+        if (trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_session_script(s));
     }
     if (rc < 0) fprintf(stderr, "stopped: %s\n", err);
     if (shot) {
-        int w = 0, h = 0;
-        const uint8_t *pixels = cmvs_scene_compose(cmvs_interp_scene(in), &w, &h);
+        const uint8_t *pixels = cmvs_session_pixels(s);
+        int w = cmvs_session_width(s), h = cmvs_session_height(s);
         err[0] = 0;
         if (pixels && cmvs_png_write(shot, pixels, w, h, err, sizeof err))
-            printf("%d items drawn into %s (%dx%d)\n",
-                   cmvs_scene_drawn(cmvs_interp_scene(in)), shot, w, h);
+            printf("%d items drawn into %s (%dx%d)\n", cmvs_session_drawn(s), shot, w, h);
         else
             fprintf(stderr, "%s: %s\n", shot, err);
     }
-    cmvs_interp_report(in, stdout);
-    missing = cmvs_interp_unimplemented(in, &kinds);
+    cmvs_session_report(s, stdout);
+    missing = cmvs_session_unimplemented(s, &kinds);
     printf("%d calls to %d commands that are not implemented yet\n", missing, kinds);
-    cmvs_interp_free(in);
-    cmvs_game_close(g);
+    cmvs_session_close(s);
     return rc < 0;
 }
 
