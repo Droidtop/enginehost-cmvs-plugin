@@ -14,6 +14,10 @@
 #define FLAGS          0x10000    /* the bit array at 0x5bcd80 */
 #define SCRIPT_VARS    0x4000     /* the per-script area at +0x3aec */
 #define COMMANDS       0x400
+#define FGLOBALS       2048       /* the float array at 0x5bad80 */
+#define GSTRINGS       128        /* the string array at 0x59ad80 */
+#define GSTRING_SIZE   1024       /* 0x473c30: index << 10, so 1 KB apiece */
+#define SCRATCH        4096       /* the accumulator at +0x13d60 */
 
 typedef struct {
     cmvs_script script;
@@ -47,7 +51,17 @@ struct cmvs_interp {
     int32_t sys[16];             /* +0x13d34 onwards, what token 0x10F reads */
 
     int32_t globals[GLOBALS];
+    float fglobals[FGLOBALS];
     uint8_t flags[FLAGS / 8];
+
+    /*
+     * The string machine. Operands in the 0x0201 grammar append their text to
+     * one accumulator (+0x13d60) as a side effect of being resolved, which is
+     * how the language concatenates; the statement itself evaluates to a handle
+     * to where the text is stored, never to the text.
+     */
+    char scratch[SCRATCH];
+    char gstring[GSTRINGS][GSTRING_SIZE];
 
     int running;       /* still executing this frame */
     int alive;         /* the script has not run off its end */
@@ -173,6 +187,117 @@ static void flag_set(cmvs_interp *in, int32_t i, int32_t v)
     else   in->flags[i >> 3] &= (uint8_t) ~(1u << (i & 7));
 }
 
+/* ---------------------------------------------------------------- strings */
+
+/*
+ * Where a handle points. This is 0x0045e530, the routine every command calls to
+ * turn one of its arguments into a char*, and it is the whole string model:
+ * four storages, told apart by the top two bits.
+ */
+static const char *string_text(cmvs_interp *in, int32_t value)
+{
+    uint32_t u = (uint32_t) value, off = u & 0x3FFFFFFFu;
+    switch (u & CMVS_STR_TAG) {
+    case CMVS_STR_POOL:
+        return in->current >= 0 ? cmvs_script_string(code(in), u) : NULL;
+    case CMVS_STR_SCRIPT:
+        if (in->current < 0 || off >= SCRIPT_VARS) return NULL;
+        return (const char *) in->slot[in->current].vars + off;
+    case CMVS_STR_GLOBAL:
+        return in->gstring[off % GSTRINGS];
+    default: {
+        int at = in->frame[in->depth] + (int) off;
+        if (at < 0 || at >= STACK_BYTES) return NULL;
+        return (const char *) in->stack + at;
+    }
+    }
+}
+
+/*
+ * The handle an operand token stands for, from the epilogue at 0x00459992: the
+ * token decides the tag and the operand is the offset. 0x122 is the one that
+ * holds a handle rather than being one, so it is read out of the stack.
+ */
+static int32_t string_handle(cmvs_interp *in, int token, int32_t operand)
+{
+    uint32_t off = (uint32_t) operand & 0x3FFFFFFFu;
+    switch (token) {
+    case 0x120: return operand;
+    case 0x121: return (int32_t) (CMVS_STR_GLOBAL | off);
+    case 0x122: return stack_get(in, in->frame[in->depth] - operand);
+    case 0x125: return (int32_t) (CMVS_STR_SCRIPT | off);
+    case 0x127: return (int32_t) (CMVS_STR_STACK | off);
+    default: return 0;
+    }
+}
+
+/* Whether such a token leaves anything in the accumulator at all: the epilogue
+ * jumps straight to its exit for every token it does not list. */
+static int string_token(int token)
+{
+    return token == 0x120 || token == 0x121 || token == 0x122
+        || token == 0x125 || token == 0x127;
+}
+
+static void string_append(cmvs_interp *in, const char *text)
+{
+    size_t have, add;
+    if (!text) return;
+    have = strlen(in->scratch);
+    add = strlen(text);
+    if (have + 1 >= sizeof in->scratch) return;
+    if (have + add + 1 > sizeof in->scratch) add = sizeof in->scratch - 1 - have;
+    memcpy(in->scratch + have, text, add);
+    in->scratch[have + add] = 0;
+}
+
+/*
+ * The store side of the three writable string tokens (0x004584f6, 0x0045850f,
+ * 0x00458531). Each copies the accumulator into its own storage and ignores the
+ * value argument, which is why a string assignment passes zero for it.
+ */
+static void string_store(cmvs_interp *in, int token, int32_t operand)
+{
+    char *dst;
+    size_t cap;
+    switch (token) {
+    case 0x121:
+        dst = in->gstring[(uint32_t) operand % GSTRINGS];
+        cap = GSTRING_SIZE;
+        break;
+    case 0x125:
+        if (in->current < 0 || operand < 0 || operand >= SCRIPT_VARS) return;
+        dst = (char *) in->slot[in->current].vars + operand;
+        cap = (size_t) (SCRIPT_VARS - operand);
+        break;
+    case 0x127: {
+        int at = in->frame[in->depth] + operand;
+        if (at < 0 || at >= STACK_BYTES) return;
+        dst = (char *) in->stack + at;
+        cap = (size_t) (STACK_BYTES - at);
+        break;
+    }
+    default: return;
+    }
+    snprintf(dst, cap, "%s", in->scratch);
+}
+
+/* The float storages (0x00458162, 0x00458188, 0x0045819f, 0x004581c6) share
+ * their bytes with the integer ones and differ only in being read through an
+ * ftol, so the conversion is where the float-ness lives. */
+static int32_t float_bits(const void *p)
+{
+    float f;
+    memcpy(&f, p, sizeof f);
+    return (int32_t) f;
+}
+
+static int32_t float_stack(const cmvs_interp *in, int at)
+{
+    if (at < 0 || at + 4 > STACK_BYTES) return 0;
+    return float_bits(in->stack + at);
+}
+
 /*
  * The value of one expression node, from the resolver at 0x457fc0. Its jump
  * table (0x458354 into 0x45830C) is what says which token means which storage:
@@ -184,12 +309,12 @@ static int32_t resolve(cmvs_interp *in, int token, int32_t operand)
 {
     int base = in->frame[in->depth];
     switch (token) {
-    case 0x100: return operand;
+    case 0x100: case 0x12A: return operand;
     case 0x101: return global_get(in, operand);
     case 0x102: return flag_get(in, operand);
     case 0x103: return stack_get(in, base - operand);
-    case 0x104: case 0x105: case 0x106: case 0x107: return script_var(in, operand);
-    case 0x108: case 0x109: case 0x10A: case 0x10B: return stack_get(in, base + operand);
+    case 0x104: case 0x106: case 0x107: return script_var(in, operand);
+    case 0x108: case 0x10A: case 0x10B: return stack_get(in, base + operand);
     case 0x10E: {
         const cmvs_script *s = code(in);
         if (operand >= 0 && operand < s->index_count) return (int32_t) s->index[operand];
@@ -198,15 +323,26 @@ static int32_t resolve(cmvs_interp *in, int token, int32_t operand)
     case 0x10F:
         return (operand >= 0 && operand < (int32_t) (sizeof in->sys / sizeof in->sys[0]))
              ? in->sys[operand] : 0;
-    case 0x120: return (int32_t) (CMVS_STRING_TAG | (uint32_t) operand);
-    case 0x121: return operand;
+    /*
+     * The four string operands evaluate to NOTHING. Each appends its text to
+     * the accumulator and falls into `mov eax, edi` with edi zeroed at the top
+     * of the resolver, which is how concatenation is expressed without a value
+     * ever carrying the text.
+     */
+    case 0x120: case 0x121: case 0x125: case 0x127:
+        string_append(in, string_text(in, string_handle(in, token, operand)));
+        return 0;
     case 0x122: return stack_get(in, stack_get(in, base - operand));
-    case 0x129: return stack_get(in, base - operand);
-    case 0x12A: return operand;
-    case 0x12B: return global_get(in, operand);
-    case 0x12C: return stack_get(in, base + operand);
-    case 0x12E: return script_var(in, operand);
-    default: return operand;
+    case 0x129: return float_stack(in, base - operand);
+    case 0x12B:
+        return (operand >= 0 && operand < FGLOBALS) ? (int32_t) in->fglobals[operand] : 0;
+    case 0x12C: return float_stack(in, base + operand);
+    case 0x12E:
+        if (in->current < 0 || operand < 0 || operand + 4 > SCRIPT_VARS) return 0;
+        return float_bits((const uint8_t *) in->slot[in->current].vars + operand);
+    /* Every other token in the table's range lands on the default handler,
+     * which returns this same zero. */
+    default: return 0;
     }
 }
 
@@ -215,14 +351,16 @@ static void assign(cmvs_interp *in, int token, int32_t operand, int32_t value)
 {
     int base = in->frame[in->depth];
     switch (token) {
-    case 0x101: case 0x12B: global_set(in, operand, value); break;
+    case 0x101: global_set(in, operand, value); break;
     case 0x102: flag_set(in, operand, value); break;
-    case 0x103: case 0x129: stack_set(in, base - operand, value); break;
-    case 0x104: case 0x105: case 0x106: case 0x107:
-    case 0x12E: set_script_var(in, operand, value); break;
-    case 0x108: case 0x109: case 0x10A: case 0x10B:
-    case 0x12C: stack_set(in, base + operand, value); break;
-    case 0x122: stack_set(in, stack_get(in, base - operand), value); break;
+    case 0x103: stack_set(in, base - operand, value); break;
+    case 0x104: case 0x106: case 0x107: set_script_var(in, operand, value); break;
+    case 0x108: case 0x10A: case 0x10B: stack_set(in, base + operand, value); break;
+    case 0x10F:
+        if (operand >= 0 && operand < (int32_t) (sizeof in->sys / sizeof in->sys[0]))
+            in->sys[operand] = value;
+        break;
+    case 0x121: case 0x125: case 0x127: string_store(in, token, operand); break;
     default: break;
     }
 }
@@ -347,10 +485,88 @@ static int apply(cmvs_interp *in, nodes *st, int token, int32_t operand)
     return 1;
 }
 
+/*
+ * The base token an operand parses AS. An indexed variable is not a token the
+ * resolver ever sees: the parsers at 0x00458eb0 and 0x00459ab0 rewrite it to
+ * the plain token of the same storage and fold the index into the operand, so
+ * that by the time a node exists the subscript is already an offset. Reading
+ * the resolver alone would say these tokens mean nothing, because they never
+ * reach it.
+ */
+static int operand_base_token(int token)
+{
+    switch (token) {
+    case 0x105: return 0x104;   /* 0x004593f6 */
+    case 0x109: return 0x108;   /* 0x00459424 */
+    case 0x110: return 0x106;   /* 0x00459452 */
+    case 0x111: return 0x107;   /* 0x004594a2 */
+    case 0x112: return 0x10A;   /* 0x00459459 */
+    case 0x113: return 0x10B;   /* 0x0045950b */
+    case 0x12A: return 0x100;   /* 0x00459512: a float literal, made an int */
+    case 0x12D: return 0x12C;   /* 0x00459552 */
+    case 0x12F: return 0x12E;   /* 0x0045955c */
+    case 0x134: return 0x130;   /* 0x0045a629, the float grammar's own */
+    case 0x135: return 0x131;   /* 0x0045a647 */
+    case 0x136: return 0x132;   /* 0x0045a633 */
+    case 0x137: return 0x133;   /* 0x0045a65b */
+    default: return token;      /* 0x107, 0x10B, 0x131 and 0x133 keep theirs */
+    }
+}
+
+/*
+ * Reads one operand token into a node. Three subscript shapes exist and the
+ * difference is only the stride: an index scaled by four for a dword array, an
+ * index scaled by a WORD the token carries at +6 for a row of a table, and that
+ * same row followed by a second index for the column.
+ */
+static int read_operand(cmvs_interp *in, int grammar, int at, int depth,
+                        int *token_out, int32_t *operand_out, int *next)
+{
+    const cmvs_script *s = code(in);
+    int token = word_at(in, at), len, nested;
+    int32_t operand = 0, stride = 4;
+    if (token < 0) return 0;
+    cmvs_token_shape((cmvs_grammar) grammar, token, &len, &nested);
+    if (len >= 6) operand = dword_at(in, at + 2);
+    if (len >= 8) stride = word_at(in, at + 6);
+    if (token == 0x12A) {
+        /* 0x00459512 loads the operand as a float and rounds it. */
+        float f;
+        uint32_t bits = (uint32_t) operand;
+        memcpy(&f, &bits, sizeof f);
+        operand = (int32_t) f;
+    }
+    at += len;
+    if (nested) {
+        int32_t index = 0;
+        int end = cmvs_expression_end(s, CMVS_GRAMMAR_200, at + 2);
+        if (end < 0 || !eval_expression(in, CMVS_GRAMMAR_200, at + 2, depth + 1, &index))
+            return 0;
+        at = end;
+        if (token == 0x101 || token == 0x102 || token == 0x12B) {
+            operand = index;          /* the index IS the operand: an array of one */
+        } else {
+            operand += index * stride;
+            if (token == 0x111 || token == 0x113 || token == 0x135 || token == 0x137) {
+                int32_t column = 0;
+                end = cmvs_expression_end(s, CMVS_GRAMMAR_200, at + 2);
+                if (end < 0 || !eval_expression(in, CMVS_GRAMMAR_200, at + 2, depth + 1, &column))
+                    return 0;
+                at = end;
+                operand += column * 4;
+            }
+        }
+    }
+    *token_out = operand_base_token(token);
+    *operand_out = operand;
+    *next = at;
+    return 1;
+}
+
 static int run_tokens(cmvs_interp *in, int grammar, int at, int depth, nodes *st, int *end)
 {
     for (;;) {
-        int token = word_at(in, at), len, nested, next;
+        int token = word_at(in, at), next = at;
         int32_t operand = 0;
         if (token < 0) return 0;
         if (token == 0x020F) { *end = at + 2; return 1; }
@@ -363,20 +579,76 @@ static int run_tokens(cmvs_interp *in, int grammar, int at, int depth, nodes *st
             at = next;
             continue;
         }
-        cmvs_token_shape(grammar, token, &len, &nested);
-        if (len >= 6) operand = dword_at(in, at + 2);
-        if (nested) {
-            int32_t v = 0;
-            if (!eval_expression(in, CMVS_GRAMMAR_200, at + len + 2, depth + 1, &v)) return 0;
-            next = cmvs_expression_end(code(in), CMVS_GRAMMAR_200, at + len + 2);
-            if (next < 0) return 0;
-            operand = v;      /* the nested value IS this node operand */
-            at = next;
-        } else {
-            at += len;
-        }
+        if (!read_operand(in, grammar, at, depth, &token, &operand, &next)) return 0;
+        at = next;
         if (!apply(in, st, token, operand)) return 0;
     }
+}
+
+/*
+ * The 0x0201 statement (0x00459790) is the string grammar, and it is a
+ * different machine from the other two. Its whole vocabulary is three shapes:
+ *
+ *  - an operand token, which APPENDS its text to the accumulator and is worth
+ *    nothing as a value (that is how the language concatenates);
+ *  - a binary operator, every one of which is concatenation here: it resolves
+ *    the left node then the right one and collapses both into a blank node;
+ *  - 0x170, assignment: resolve the right node, then copy the accumulator into
+ *    the storage the left node names.
+ *
+ * What the statement leaves in the interpreter's accumulator is decided by the
+ * FIRST node alone (the epilogue at 0x00459992), and it is a handle to that
+ * node's storage. So a string argument is always pushed as a bare variable
+ * reference; a concatenation blanks the first node and the epilogue then
+ * leaves the accumulator untouched, which is why `set_acc` exists here.
+ */
+static int run_string_expression(cmvs_interp *in, int at, int *end, int *set_acc,
+                                 int32_t *result)
+{
+    node st[MAX_NODES];
+    int count = 0;
+
+    in->scratch[0] = 0;   /* 0x004597aa empties it before the first token */
+    for (;;) {
+        int token = word_at(in, at), len, nested;
+        int32_t operand = 0;
+        if (token < 0) return 0;
+        if (token == 0x020F) { at += 2; break; }
+        cmvs_token_shape(CMVS_GRAMMAR_201, token, &len, &nested);
+        if (nested) {
+            /* 0x004598fb: token 0x121's index is a nested 0x200 expression. */
+            int32_t v = 0;
+            int next = cmvs_expression_end(code(in), CMVS_GRAMMAR_200, at + len + 2);
+            if (next < 0 || !eval_expression(in, CMVS_GRAMMAR_200, at + len + 2, 1, &v))
+                return 0;
+            operand = v;
+            at = next;
+        } else {
+            if (len >= 6) operand = dword_at(in, at + 2);
+            at += len;
+        }
+        if (token >= 0x160 && token <= 0x172) {
+            if (count < 2) return 0;
+            if (token == 0x170) {
+                resolve(in, st[count - 1].token, st[count - 1].operand);
+                string_store(in, st[count - 2].token, st[count - 2].operand);
+            } else {
+                resolve(in, st[count - 2].token, st[count - 2].operand);
+                resolve(in, st[count - 1].token, st[count - 1].operand);
+            }
+            st[count - 2].token = 0;
+            st[count - 2].operand = 0;
+            count--;
+        } else if (count < MAX_NODES) {
+            st[count].token = token;
+            st[count].operand = operand;
+            count++;
+        }
+    }
+    *end = at;
+    *set_acc = count > 0 && string_token(st[0].token);
+    *result = *set_acc ? string_handle(in, st[0].token, st[0].operand) : 0;
+    return 1;
 }
 
 static int eval_expression(cmvs_interp *in, int grammar, int at, int depth, int32_t *result)
@@ -403,10 +675,13 @@ static int32_t arg(const cmvs_interp *in, int n, int i)
     return stack_get(in, in->sp - 4 * (n - i));
 }
 
+/* A command argument as text. Only the tagged storages are certain to be
+ * strings; an untagged value is a string-pool offset, but it is also what every
+ * small integer looks like, so the caller decides whether to believe it. */
 static const char *as_string(cmvs_interp *in, int32_t v)
 {
-    if (((uint32_t) v & CMVS_STRING_TAG) == 0) return NULL;
-    return cmvs_script_string(code(in), (uint32_t) v & ~CMVS_STRING_TAG);
+    if (((uint32_t) v & CMVS_STR_TAG) == 0) return NULL;
+    return string_text(in, v);
 }
 
 /*
@@ -431,8 +706,16 @@ static int do_command(cmvs_interp *in, int command)
         for (i = 0; i < n; i++) {
             int32_t v = arg(in, n, i);
             const char *text = as_string(in, v);
-            if (text) fprintf(stderr, "%s\"%s\"", i ? ", " : "", text);
-            else fprintf(stderr, "%s%d", i ? ", " : "", v);
+            if (text) { fprintf(stderr, "%s\"%s\"", i ? ", " : "", text); continue; }
+            fprintf(stderr, "%s%d", i ? ", " : "", v);
+            /* An untagged value may still be a pool offset. Only believe it
+             * when it lands on the START of a pooled string, or every small
+             * integer in the trace acquires a spurious quotation. */
+            if (v > 0 && code(in)->strings && v < code(in)->strings_size
+                && code(in)->strings[v - 1] == 0) {
+                text = string_text(in, v);
+                if (text && *text) fprintf(stderr, "=\"%s\"", text);
+            }
         }
         fprintf(stderr, ")  sp=%d acc=%d", in->sp, in->acc);
         fputc(0x0A, stderr);
@@ -464,7 +747,10 @@ static int do_command(cmvs_interp *in, int command)
  */
 static int command_boot(cmvs_interp *in, int command)
 {
-    const char *name = as_string(in, arg(in, 1, 0));
+    /* A command knows its own arguments are strings, so it decodes them
+     * unconditionally (0x0045e530). as_string is the trace's guess; this is
+     * not a guess. */
+    const char *name = string_text(in, arg(in, 1, 0));
 
     switch (command) {
     case 0x000:
@@ -502,7 +788,7 @@ static int command_boot(cmvs_interp *in, int command)
     case 0x081: {
         int slot;
         char why[256];
-        name = as_string(in, arg(in, 2, 0));
+        name = string_text(in, arg(in, 2, 0));
         if (!name) return 0;
         for (slot = 1; slot < MAX_SLOTS; slot++) if (!in->slot[slot].loaded) break;
         if (slot < MAX_SLOTS && load_slot(in, slot, name, why, sizeof why)) {
@@ -574,9 +860,19 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
             fprintf(stderr, "%-12s %06x op %04x sp=%-6d depth=%-3d acc=%d\n",
                     in->slot[in->current].name, in->pc, op, in->sp, in->depth, in->acc);
 
-        if (op == 0x0200 || op == 0x0201 || op == 0x0202) {
-            int grammar = op == 0x0200 ? CMVS_GRAMMAR_200
-                        : op == 0x0201 ? CMVS_GRAMMAR_201 : CMVS_GRAMMAR_202;
+        if (op == 0x0201) {
+            int end = 0, set_acc = 0;
+            int32_t v = 0;
+            if (!run_string_expression(in, in->pc + 2, &end, &set_acc, &v)) {
+                fail(err, errlen, "a string expression the interpreter could not evaluate");
+                return -1;
+            }
+            if (set_acc) in->acc = v;   /* 0x00459a0e leaves it alone otherwise */
+            in->pc = end;
+            continue;
+        }
+        if (op == 0x0200 || op == 0x0202) {
+            int grammar = op == 0x0200 ? CMVS_GRAMMAR_200 : CMVS_GRAMMAR_202;
             int32_t v = 0;
             int end = cmvs_expression_end(code(in), grammar, in->pc + 2);
             if (end < 0 || !eval_expression(in, grammar, in->pc + 2, 0, &v)) {

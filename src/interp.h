@@ -23,9 +23,17 @@
 
 typedef struct cmvs_interp cmvs_interp;
 
-/* Values are 32 bit. A string is the pool offset with this bit set, the same
- * tagging the engine uses (it masks handles with 0x3FFFFFFF at 0x4581FD). */
-#define CMVS_STRING_TAG 0x80000000u
+/*
+ * Values are 32 bit. A string value carries no text: it is a handle whose top
+ * two bits name the storage it lives in and whose low 30 bits are an offset
+ * into it. 0x0045e530, which every command calls to turn an argument into a
+ * char*, is exactly this decode, so these four cases are all there are.
+ */
+#define CMVS_STR_TAG    0xC0000000u
+#define CMVS_STR_POOL   0x00000000u   /* offset into the script's string pool */
+#define CMVS_STR_SCRIPT 0x40000000u   /* offset into the script variable area */
+#define CMVS_STR_GLOBAL 0x80000000u   /* index into the 128 global strings */
+#define CMVS_STR_STACK  0xC0000000u   /* offset above the current frame */
 
 cmvs_interp *cmvs_interp_new(cmvs_game *game);
 void cmvs_interp_free(cmvs_interp *in);
