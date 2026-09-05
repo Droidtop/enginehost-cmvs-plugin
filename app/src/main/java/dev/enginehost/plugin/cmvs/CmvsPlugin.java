@@ -1,145 +1,156 @@
 package dev.enginehost.plugin.cmvs;
 
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.view.MotionEvent;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Log;
 import android.view.View;
 import dev.enginehost.api.EngineControllerEvent;
 import dev.enginehost.api.EnginePlugin;
 import dev.enginehost.api.EnginePluginSession;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.nio.charset.Charset;
-import java.util.Arrays;
-import java.util.Locale;
-import java.util.List;
-import org.json.JSONObject;
 
-/** Experimental in-process PS2/PS3 dialogue interpreter. */
+/**
+ * The Android wrapper around the CMVS engine.
+ *
+ * <p>The engine is the C in this repository's {@code src}, the same code the
+ * desktop runner builds: it opens the game's CPZ archives, runs the PS3
+ * bytecode and composes a frame. Everything this class does is hand it the game
+ * folder, run it once per display frame, and show the picture. No part of the
+ * engine is repeated in Java.
+ */
 public final class CmvsPlugin implements EnginePlugin {
+    static {
+        System.loadLibrary("cmvs");
+    }
+
+    /** ~60 frames a second, which is the rate the engine's own timers assume. */
+    private static final long FRAME_MS = 16;
+
     private EnginePluginSession session;
-    private DialogueView view;
+    private long engine;
+    private ScreenView view;
+    private final Handler clock = new Handler(Looper.getMainLooper());
+    private boolean running;
 
     @Override public void onCreate(EnginePluginSession session) throws Exception {
         this.session = session;
-        if (!"cmvs".equals(session.engine()) || !("ps2".equals(session.engineContext()) || "ps3".equals(session.engineContext()))) {
+        String context = session.engineContext();
+        if (!"cmvs".equals(session.engine()) || !("ps2".equals(context) || "ps3".equals(context))) {
             throw new IOException("Unsupported CMVS context");
         }
-        view = new DialogueView(readScript());
+        // execFile names the boot script when a game does not use the usual one.
+        // The engine falls back to start.ps3, which every CMVS game ships loose
+        // beside its archives, so an empty execFile is the normal case.
+        engine = nativeOpen(session.gamePath(), session.execFile());
+        if (engine == 0) throw new IOException(nativeError());
+        view = new ScreenView();
         session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
+        start();
     }
 
-    /**
-     * A real CMVS game keeps its scripts inside a CPZ archive, so that is where
-     * this looks first; a loose extracted script is still accepted, because
-     * that is how the reader was originally developed.
-     */
-    private List<String> readScript() throws Exception {
-        File root = new File(session.gamePath()).getCanonicalFile();
-        if (!root.isDirectory()) throw new IOException("CMVS game folder is unreadable");
-        String context = session.engineContext();
-        String exec = session.execFile();
-        Charset encoding = resolveEncoding();
-
-        if (exec != null && !exec.isBlank() && new File(root, exec).isFile()) {
-            return CmvsScript.read(confined(root, exec, context), encoding);
-        }
-        File[] extracted = root.listFiles((dir, name) -> name.toLowerCase(Locale.ROOT).endsWith("." + context));
-        if ((exec == null || exec.isBlank()) && extracted != null && extracted.length > 0) {
-            Arrays.sort(extracted);
-            return CmvsScript.read(extracted[0].getCanonicalFile(), encoding);
-        }
-
-        File archive = scriptArchive(root);
-        try (CmvsArchive cpz = CmvsArchive.open(archive)) {
-            session.host().log(android.util.Log.INFO, "cmvs", archive.getName() + ": "
-                + cpz.names().size() + " entries, scheme " + cpz.schemeName(), null);
-            CmvsArchive.Entry entry = chooseScript(cpz, exec, context);
-            return CmvsScript.read(cpz.read(entry), false, entry.name, encoding);
-        }
+    @Override public void onPause() {
+        stop();
     }
 
-    /** The archive holding the scripts, under the data folder cmvs.cfg names. */
-    private File scriptArchive(File root) throws IOException {
-        File folder = new File(root, scriptFolder(root));
-        File archive = new File(folder, "script.cpz");
-        if (!archive.isFile()) {
-            throw new IOException("No CMVS script archive at " + folder.getName() + "/script.cpz");
-        }
-        return archive;
+    @Override public void onResume() {
+        if (engine != 0) start();
     }
 
-    /** SCRIPT_INIT_PATH from cmvs.cfg, which every CMVS game ships; data/pack otherwise. */
-    private String scriptFolder(File root) {
-        File config = new File(root, "cmvs.cfg");
-        if (config.isFile() && config.length() < 1024 * 1024) {
-            try {
-                for (String line : java.nio.file.Files.readAllLines(config.toPath(), Charset.forName("Shift_JIS"))) {
-                    String trimmed = line.trim();
-                    if (trimmed.toUpperCase(Locale.ROOT).startsWith("SCRIPT_INIT_PATH=")) {
-                        String value = trimmed.substring("SCRIPT_INIT_PATH=".length()).trim().replace('\\', '/');
-                        while (value.endsWith("/")) value = value.substring(0, value.length() - 1);
-                        if (!value.isEmpty() && !value.startsWith("/") && !value.contains("..")) return value;
-                    }
-                }
-            } catch (Exception unreadable) {
-                session.host().log(android.util.Log.WARN, "cmvs", "Ignoring unreadable cmvs.cfg", unreadable);
-            }
+    @Override public void onDestroy() {
+        stop();
+        if (engine != 0) {
+            nativeClose(engine);
+            engine = 0;
         }
-        return "data/pack";
-    }
-
-    /** execFile may name an entry inside the archive; otherwise the game's own main script. */
-    private CmvsArchive.Entry chooseScript(CmvsArchive cpz, String exec, String context) throws IOException {
-        if (exec != null && !exec.isBlank()) {
-            CmvsArchive.Entry named = cpz.find(exec);
-            if (named == null) throw new IOException("No script named " + exec + " in the CMVS archive");
-            return named;
-        }
-        CmvsArchive.Entry main = cpz.find("code/main." + context);
-        if (main != null) return main;
-        for (String name : cpz.names()) {
-            if (name.endsWith("." + context)) return cpz.find(name);
-        }
-        throw new IOException("The CMVS script archive holds no ." + context + " script");
-    }
-
-    private File confined(File root, String relative, String context) throws IOException {
-        if (new File(relative).isAbsolute()) throw new IOException("execFile must be relative");
-        File file = new File(root, relative).getCanonicalFile();
-        if (!file.isFile() || !file.getPath().startsWith(root.getPath() + File.separator) ||
-            !file.getName().toLowerCase(java.util.Locale.ROOT).endsWith("." + context)) {
-            throw new IOException("CMVS execFile leaves the folder or mismatches context");
-        }
-        return file;
-    }
-
-    private Charset resolveEncoding() throws Exception {
-        String name = new JSONObject(session.optionsJson() == null ? "{}" : session.optionsJson())
-            .optString("textEncoding", "Shift_JIS");
-        if (!Charset.isSupported(name)) throw new IOException("Unsupported CMVS textEncoding: " + name);
-        return Charset.forName(name);
     }
 
     @Override public boolean onControllerEvent(EngineControllerEvent event) {
-        if (event.pressed() && ("confirm".equals(event.action()) || "page_next".equals(event.action()))) {
-            view.advance(); return true;
-        }
+        // The engine reads no input yet: the scripts poll for it through
+        // commands that are not implemented, so nothing here would reach them.
+        // Claiming the event would only stop the host acting on it.
         return false;
     }
 
-    private final class DialogueView extends View {
-        private final List<String> strings;
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private int cursor;
-        DialogueView(List<String> strings) { super(session.host().context()); this.strings = strings; paint.setColor(Color.WHITE); paint.setTextSize(34); setBackgroundColor(Color.BLACK); restore(); }
-        void advance() { if (cursor + 1 < strings.size()) { cursor++; save(); invalidate(); } }
-        private File stateFile() { return new File(session.host().saveDirectory(), "cmvs-experimental-state.json"); }
-        private void restore() { try { File f=stateFile(); if(!f.isFile()||f.length()>1024*1024)return; byte[] b=new byte[(int)f.length()]; try(java.io.FileInputStream in=new java.io.FileInputStream(f)){int o=0;for(int n;o<b.length&&(n=in.read(b,o,b.length-o))>0;)o+=n;} cursor=Math.max(0,Math.min(Math.max(0,strings.size()-1),new JSONObject(new String(b,java.nio.charset.StandardCharsets.UTF_8)).optInt("cursor",0))); } catch(Exception e){session.host().log(android.util.Log.WARN,"cmvs","Ignoring invalid save",e);} }
-        private void save() { try(FileOutputStream out=new FileOutputStream(stateFile(),false)){out.write(new JSONObject().put("cursor",cursor).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));}catch(Exception e){session.host().log(android.util.Log.ERROR,"cmvs","Could not save",e);} }
-        @Override protected void onDraw(Canvas canvas) { super.onDraw(canvas); String value=strings.isEmpty()?"No dialogue references found":strings.get(Math.min(cursor,strings.size()-1)); float y=getHeight()*.65f; for(int start=0;start<value.length();){int count=paint.breakText(value,start,value.length(),true,getWidth()-96,null);if(count<=0)break;canvas.drawText(value,start,start+count,48,y,paint);start+=count;y+=44;} }
-        @Override public boolean onTouchEvent(MotionEvent event) { if(event.getAction()==MotionEvent.ACTION_UP)advance(); return true; }
+    private void start() {
+        if (running) return;
+        running = true;
+        clock.post(tick);
     }
+
+    private void stop() {
+        running = false;
+        clock.removeCallbacks(tick);
+    }
+
+    private final Runnable tick = new Runnable() {
+        @Override public void run() {
+            if (!running || engine == 0) return;
+            if (!view.step()) {
+                // The script ran off its end. The last frame stays on screen
+                // rather than the display going black, which is what the reader
+                // should see when a game stops.
+                session.host().log(Log.INFO, "cmvs", "The script ended in " + nativeScript(engine), null);
+                running = false;
+                return;
+            }
+            clock.postDelayed(this, FRAME_MS);
+        }
+    };
+
+    /**
+     * Shows the engine's picture. A CMVS game is authored for one fixed screen
+     * size, which cmvs.cfg names, so the frame arrives at that size and is
+     * scaled to the console's, centred, with the aspect ratio kept.
+     */
+    private final class ScreenView extends View {
+        private final int width;
+        private final int height;
+        private final int[] pixels;
+        private final Bitmap frame;
+        private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final Rect source;
+        private final RectF destination = new RectF();
+
+        ScreenView() {
+            super(session.host().context());
+            width = nativeWidth(engine);
+            height = nativeHeight(engine);
+            pixels = new int[width * height];
+            frame = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            source = new Rect(0, 0, width, height);
+            setBackgroundColor(Color.BLACK);
+        }
+
+        /** Runs one frame. False once the script has ended. */
+        boolean step() {
+            boolean alive = nativeFrame(engine, pixels);
+            frame.setPixels(pixels, 0, width, 0, 0, width, height);
+            invalidate();
+            return alive;
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float scale = Math.min(getWidth() / (float) width, getHeight() / (float) height);
+            float left = (getWidth() - width * scale) / 2;
+            float top = (getHeight() - height * scale) / 2;
+            destination.set(left, top, left + width * scale, top + height * scale);
+            canvas.drawBitmap(frame, source, destination, paint);
+        }
+    }
+
+    private static native long nativeOpen(String folder, String script);
+    private static native String nativeError();
+    private static native void nativeClose(long engine);
+    private static native int nativeWidth(long engine);
+    private static native int nativeHeight(long engine);
+    private static native boolean nativeFrame(long engine, int[] pixels);
+    private static native String nativeScript(long engine);
+    private static native int nativeDrawn(long engine);
 }
