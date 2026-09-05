@@ -122,7 +122,9 @@ final class CmvsArchive implements Closeable {
      * Reads one entry, decrypted, and unpacked if it is a PS2A container.
      * The returned data keeps the PS2A header, whose compressed-size fields
      * still describe the packed form; {@link CmvsScript} is told not to unpack
-     * again.
+     * again. A PB3B image gets its own header pass instead: CPZ masks bytes
+     * 8..0x33 of every stored PB3, so without it the type, size and offset
+     * fields an image reader needs are still noise.
      */
     byte[] read(Entry entry) throws IOException {
         byte[] data = new byte[entry.size];
@@ -137,7 +139,25 @@ final class CmvsArchive implements Closeable {
         if (data.length > 0x30 && data[0] == 'P' && data[1] == 'S' && data[2] == '2' && data[3] == 'A') {
             return unpackPs2(data);
         }
+        if (data.length > 0x40 && data[0] == 'P' && data[1] == 'B' && data[2] == '3' && data[3] == 'B') {
+            decryptPb3(data);
+        }
         return data;
+    }
+
+    /**
+     * Unmasks a stored PB3B header. Bytes 8..0x33 are XORed with a pair of keys
+     * taken from the tail of the file and then have a run of tail bytes
+     * subtracted from them, two bytes at a time.
+     */
+    static void decryptPb3(byte[] data) {
+        int key1 = data[data.length - 3] & 0xFF;
+        int key2 = data[data.length - 2] & 0xFF;
+        int src = data.length - 0x2F;
+        for (int i = 8; i < 0x34; i += 2) {
+            data[i] = (byte) (((data[i] & 0xFF) ^ key1) - (data[src++] & 0xFF));
+            data[i + 1] = (byte) (((data[i + 1] & 0xFF) ^ key2) - (data[src++] & 0xFF));
+        }
     }
 
     @Override public void close() throws IOException {
