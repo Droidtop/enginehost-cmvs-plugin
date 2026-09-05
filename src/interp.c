@@ -423,12 +423,18 @@ static int do_command(cmvs_interp *in, int command)
 {
     if (command >= 0 && command < COMMANDS) in->command_seen[command]++;
     if (in->trace) {
-        const char *s0 = as_string(in, arg(in, 1, 0));
-        const char *s1 = as_string(in, arg(in, 2, 0));
-        fprintf(stderr, "  %-12s cmd 0x%03x  sp=%-6d acc=%-10d", in->slot[in->current].name,
-                command, in->sp, in->acc);
-        if (s1) fprintf(stderr, "  [%s] [%s]", s1, s0 ? s0 : "");
-        else if (s0) fprintf(stderr, "  [%s]", s0);
+        /* The ABI byte count is how many arguments the bytecode pushed, so the
+         * trace can name them all instead of guessing at the top two. */
+        int abi = (command >= 0 && command < CMVS_COMMANDS) ? cmvs_command_abi[command] : 0;
+        int n = abi > 0 ? CMVS_CMD_ARGS(abi) / 4 : 0, i;
+        fprintf(stderr, "  %-12s cmd 0x%03x (", in->slot[in->current].name, command);
+        for (i = 0; i < n; i++) {
+            int32_t v = arg(in, n, i);
+            const char *text = as_string(in, v);
+            if (text) fprintf(stderr, "%s\"%s\"", i ? ", " : "", text);
+            else fprintf(stderr, "%s%d", i ? ", " : "", v);
+        }
+        fprintf(stderr, ")  sp=%d acc=%d", in->sp, in->acc);
         fputc(0x0A, stderr);
     }
     {
