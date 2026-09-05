@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "commands.h"
+#include "scene.h"
 #include "vm.h"
 
 #define MAX_SLOTS      8
@@ -28,6 +29,7 @@ typedef struct {
 
 struct cmvs_interp {
     cmvs_game *game;
+    cmvs_scene *scene;
 
     cmvs_slot slot[MAX_SLOTS];
     int current;                 /* +0x3390 */
@@ -83,6 +85,8 @@ cmvs_interp *cmvs_interp_new(cmvs_game *game)
     in->game = game;
     in->current = -1;
     in->frame_ms = 16;
+    in->scene = cmvs_scene_new(game, cmvs_game_width(game), cmvs_game_height(game));
+    if (!in->scene) { free(in); return NULL; }
     return in;
 }
 
@@ -92,10 +96,12 @@ void cmvs_interp_free(cmvs_interp *in)
     if (!in) return;
     for (i = 0; i < MAX_SLOTS; i++)
         if (in->slot[i].loaded) cmvs_script_close(&in->slot[i].script);
+    cmvs_scene_free(in->scene);
     free(in);
 }
 
 void cmvs_interp_trace(cmvs_interp *in, int on) { in->trace = on; }
+cmvs_scene *cmvs_interp_scene(cmvs_interp *in) { return in->scene; }
 long cmvs_interp_statements(const cmvs_interp *in) { return in->statements; }
 
 static const cmvs_script *code(const cmvs_interp *in)
@@ -690,7 +696,7 @@ static const char *as_string(cmvs_interp *in, int32_t v)
  * 0xC000: it is how a script yields back to the engine, which is why the boot
  * script ends on it rather than running off its own end.
  */
-static int command_boot(cmvs_interp *in, int command);
+static int command_builtin(cmvs_interp *in, int command);
 static int load_slot(cmvs_interp *in, int slot, const char *name, char *err, size_t errlen);
 static int enter_script(cmvs_interp *in, const char *name, char *err, size_t errlen);
 
@@ -722,7 +728,7 @@ static int do_command(cmvs_interp *in, int command)
     }
     {
         int abi = (command >= 0 && command < CMVS_COMMANDS) ? cmvs_command_abi[command] : -1;
-        int flags = command_boot(in, command);
+        int flags = command_builtin(in, command);
         if (abi < 0) abi = CMVS_CMD_ADVANCE;   /* extractor gap; see commands.c */
         flags |= abi;
         /* The argument pop is the engine's own bookkeeping at 0x45AC55, done
@@ -736,16 +742,20 @@ static int do_command(cmvs_interp *in, int command)
 
 
 /*
- * The commands the boot script uses. Their meaning is not guessed: start.ps3
- * calls each with the path it applies to, so the trace names them - 0x010 to
- * 0x01A mount the archives and folders, 0x080 names the script the engine runs
- * after boot, 0x081 registers a resident script, and 0x000 yields.
+ * The built-in commands. None of these is guessed: each was read off its
+ * handler in cmvs32.exe, and the address is on the case.
  *
- * The mounts are recorded rather than acted on, because cmvs_game already opens
- * every archive under the pack folder; keeping a second mount table would be
- * two mechanisms for one job.
+ * The archive mounts (0x010..0x01A) are recorded rather than acted on, because
+ * cmvs_game already opens every archive under the pack folder; keeping a second
+ * mount table would be two mechanisms for one job.
+ *
+ * Arguments sit under the stack top and are NOT popped by the command: arg(n,i)
+ * is the i-th of n in the order the bytecode pushed them, so the LAST one is
+ * what a handler reads as [sp-4]. In the drawing commands that last argument is
+ * always the object and the one before it the part, with -1 meaning the object
+ * itself.
  */
-static int command_boot(cmvs_interp *in, int command)
+static int command_builtin(cmvs_interp *in, int command)
 {
     /* A command knows its own arguments are strings, so it decodes them
      * unconditionally (0x0045e530). as_string is the trace's guess; this is
@@ -785,6 +795,45 @@ static int command_boot(cmvs_interp *in, int command)
         in->command_known[command] = 1;
         return 0;
     }
+    /* ------------------------------------------------------- graphic objects */
+    case 0x020:   /* 0x0045e8f0: a fresh object in the table at +0x77c */
+        in->command_known[command] = cmvs_scene_object(in->scene, arg(in, 1, 0));
+        return 0;
+    case 0x022:   /* 0x00433cb0: a fresh part, an object of the same class */
+        in->command_known[command] =
+            cmvs_scene_part(in->scene, arg(in, 2, 1), arg(in, 2, 0));
+        return 0;
+    case 0x030:   /* 0x0045ee10: decode a PB3 into the object (0x420840) */
+        in->sys[0] = cmvs_scene_bitmap(in->scene, arg(in, 2, 1),
+                                       string_text(in, arg(in, 2, 0)));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x040:   /* 0x0045f650: give the object a draw item (0x434970) */
+        in->command_known[command] = cmvs_scene_item(in->scene, arg(in, 1, 0), -1);
+        return 0;
+    case 0x050:   /* 0x0045f6d0: the same, for one part */
+        in->command_known[command] =
+            cmvs_scene_item(in->scene, arg(in, 2, 1), arg(in, 2, 0));
+        return 0;
+    case 0x044:   /* 0x0045f910 -> 0x41bd00: the source rectangle */
+        cmvs_scene_source(in->scene, arg(in, 6, 5), arg(in, 6, 4),
+                          arg(in, 6, 3), arg(in, 6, 2), arg(in, 6, 1), arg(in, 6, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x045:   /* 0x0045f9a0 -> 0x41bd60: where it lands */
+        cmvs_scene_at(in->scene, arg(in, 4, 3), arg(in, 4, 2),
+                      arg(in, 4, 1), arg(in, 4, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x046:   /* 0x0045faa0 -> 0x41bd40: an offset on top of that */
+        cmvs_scene_offset(in->scene, arg(in, 4, 3), arg(in, 4, 2),
+                          arg(in, 4, 1), arg(in, 4, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x047:   /* 0x0045fb10 -> 0x41bda0: one size */
+        cmvs_scene_size(in->scene, arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0));
+        in->command_known[command] = 1;
+        return 0;
     case 0x081: {
         int slot;
         char why[256];

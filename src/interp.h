@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include "game.h"
+#include "scene.h"
 #include "script.h"
 
 typedef struct cmvs_interp cmvs_interp;
@@ -61,6 +62,14 @@ void cmvs_interp_frame_ms(cmvs_interp *in, int ms);
 const char *cmvs_interp_script(const cmvs_interp *in);
 
 void cmvs_interp_trace(cmvs_interp *in, int on);
+
+/* What the commands have drawn into. The runner reads it for a screenshot; the
+ * Android wrapper will read it for the frame it hands to the surface. */
+cmvs_scene *cmvs_interp_scene(cmvs_interp *in);
+
+/* What the commands have drawn into. The runner reads it for a screenshot; the
+ * Android wrapper will read it for the frame it hands to the surface. */
+cmvs_scene *cmvs_interp_scene(cmvs_interp *in);
 
 /* What the run did, for the desktop runner to print. */
 long cmvs_interp_statements(const cmvs_interp *in);

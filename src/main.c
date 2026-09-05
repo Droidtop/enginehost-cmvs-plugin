@@ -8,7 +8,7 @@
  *   cmvs <game folder>                       list what the archives hold
  *   cmvs <game folder> --check               decode a sample of every image
  *   cmvs <game folder> --show <entry>        open a window on one image
- *   cmvs <game folder> --run [script] [-v] [-f frames]   run the bytecode
+ *   cmvs <game folder> --run [script] [-v] [-f frames] [--shot out.png]
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +20,8 @@
 #include "game.h"
 #include "interp.h"
 #include "pb3.h"
+#include "png.h"
+#include "scene.h"
 #include "script.h"
 #include "vm.h"
 
@@ -302,7 +304,8 @@ static int cmd_png(const char *game, const char *wanted, const char *out_path)
 /* Runs the bytecode. This is the milestone the engine is built towards: the
  * boot script executing far enough that the commands it calls are the real
  * work list for what to implement next. */
-static int cmd_run(const char *folder, const char *script, int trace, long budget, int frames)
+static int cmd_run(const char *folder, const char *script, int trace, long budget,
+                   int frames, const char *shot)
 {
     char err[256] = {0};
     cmvs_game *g = cmvs_game_open(folder, err, sizeof err);
@@ -325,6 +328,16 @@ static int cmd_run(const char *folder, const char *script, int trace, long budge
         if (trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_interp_script(in));
     }
     if (rc < 0) fprintf(stderr, "stopped: %s\n", err);
+    if (shot) {
+        int w = 0, h = 0;
+        const uint8_t *pixels = cmvs_scene_compose(cmvs_interp_scene(in), &w, &h);
+        err[0] = 0;
+        if (pixels && cmvs_png_write(shot, pixels, w, h, err, sizeof err))
+            printf("%d items drawn into %s (%dx%d)\n",
+                   cmvs_scene_drawn(cmvs_interp_scene(in)), shot, w, h);
+        else
+            fprintf(stderr, "%s: %s\n", shot, err);
+    }
     cmvs_interp_report(in, stdout);
     missing = cmvs_interp_unimplemented(in, &kinds);
     printf("%d calls to %d commands that are not implemented yet\n", missing, kinds);
@@ -348,7 +361,7 @@ int main(int argc, char **argv)
         return cmd_scripts(argv[1], argc >= 4 ? argv[3] : NULL);
     }
     if (argc >= 3 && !strcmp(argv[2], "--run")) {
-        const char *script = "start.ps3";
+        const char *script = "start.ps3", *shot = NULL;
         int trace = 0, i, frames = 60;
         long budget = 2000000;
         for (i = 3; i < argc; i++) {
@@ -356,9 +369,10 @@ int main(int argc, char **argv)
             else if (!strcmp(argv[i], "-vv")) trace = 2;
             else if (!strcmp(argv[i], "-n") && i + 1 < argc) budget = atol(argv[++i]);
             else if (!strcmp(argv[i], "-f") && i + 1 < argc) frames = atoi(argv[++i]);
+            else if (!strcmp(argv[i], "--shot") && i + 1 < argc) shot = argv[++i];
             else script = argv[i];
         }
-        return cmd_run(argv[1], script, trace, budget, frames);
+        return cmd_run(argv[1], script, trace, budget, frames, shot);
     }
     if (argc >= 4 && !strcmp(argv[2], "--show")) return cmd_show(argv[1], argv[3]);
     if (argc >= 5 && !strcmp(argv[2], "--bmp")) return cmd_png(argv[1], argv[3], argv[4]);
