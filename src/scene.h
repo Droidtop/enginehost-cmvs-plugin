@@ -56,6 +56,10 @@ void cmvs_scene_at(cmvs_scene *s, int object, int part, int x, int y);
 void cmvs_scene_offset(cmvs_scene *s, int object, int part, int x, int y);
 void cmvs_scene_size(cmvs_scene *s, int object, int part, int size);
 
+/* Command 0x215 shows a menu item's part (0x00432B70 sets +0xc38). A part
+ * that has been hidden is not composed. */
+void cmvs_scene_show(cmvs_scene *s, int object, int part, int visible);
+
 /* Composes everything into one BGRA frame, top-down, stride 4 * width. The
  * buffer belongs to the scene. */
 const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height);

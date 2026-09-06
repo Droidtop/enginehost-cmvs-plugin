@@ -34,6 +34,17 @@ int cmvs_session_frame(cmvs_session *s, char *err, size_t errlen);
 /* The last composed frame: BGRA, top-down, stride 4 * width. */
 const uint8_t *cmvs_session_pixels(const cmvs_session *s);
 
+/*
+ * Input. The pointer is in the GAME's coordinates, not the display's: a
+ * frontend scales the picture onto its screen and so it, and only it, can undo
+ * that. A session nobody points at simply never selects anything.
+ * `button` is 0 for the left button (a tap, confirm) and 1 for the right
+ * (cancel); `direction` is -1 up and +1 down.
+ */
+void cmvs_session_pointer(cmvs_session *s, int x, int y);
+void cmvs_session_button(cmvs_session *s, int button, int down);
+void cmvs_session_navigate(cmvs_session *s, int direction);
+
 /* What is running, for a status line or a log. */
 const char *cmvs_session_script(const cmvs_session *s);
 long cmvs_session_statements(const cmvs_session *s);

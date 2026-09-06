@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "commands.h"
+#include "menu.h"
 #include "scene.h"
 #include "vm.h"
 
@@ -30,6 +31,8 @@ typedef struct {
 struct cmvs_interp {
     cmvs_game *game;
     cmvs_scene *scene;
+    cmvs_menus *menus;           /* the six at +0xc6c */
+    cmvs_input input;            /* the device at +0xcb8 */
 
     cmvs_slot slot[MAX_SLOTS];
     int current;                 /* +0x3390 */
@@ -87,6 +90,8 @@ cmvs_interp *cmvs_interp_new(cmvs_game *game)
     in->frame_ms = 16;
     in->scene = cmvs_scene_new(game, cmvs_game_width(game), cmvs_game_height(game));
     if (!in->scene) { free(in); return NULL; }
+    in->menus = cmvs_menus_new();
+    if (!in->menus) { cmvs_scene_free(in->scene); free(in); return NULL; }
     return in;
 }
 
@@ -96,12 +101,14 @@ void cmvs_interp_free(cmvs_interp *in)
     if (!in) return;
     for (i = 0; i < MAX_SLOTS; i++)
         if (in->slot[i].loaded) cmvs_script_close(&in->slot[i].script);
+    cmvs_menus_free(in->menus);
     cmvs_scene_free(in->scene);
     free(in);
 }
 
 void cmvs_interp_trace(cmvs_interp *in, int on) { in->trace = on; }
 cmvs_scene *cmvs_interp_scene(cmvs_interp *in) { return in->scene; }
+cmvs_input *cmvs_interp_input(cmvs_interp *in) { return in ? &in->input : NULL; }
 long cmvs_interp_statements(const cmvs_interp *in) { return in->statements; }
 
 static const cmvs_script *code(const cmvs_interp *in)
@@ -832,6 +839,41 @@ static int command_builtin(cmvs_interp *in, int command)
         return 0;
     case 0x047:   /* 0x0045fb10 -> 0x41bda0: one size */
         cmvs_scene_size(in->scene, arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0));
+        in->command_known[command] = 1;
+        return 0;
+    /* -------------------------------------------------------------- menus */
+    case 0x210:   /* 0x004690C0: bind menu arg1 to graphic object arg0 */
+        in->command_known[command] = cmvs_menu_bind(in->menus, arg(in, 2, 1), arg(in, 2, 0));
+        return 0;
+    case 0x211:   /* 0x00469370: throw the menu away */
+        cmvs_menu_drop(in->menus, arg(in, 1, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x212:   /* 0x004693D0 -> 0x00453870: one more item, by id */
+        in->sys[0] = cmvs_menu_add(in->menus, arg(in, 2, 1), arg(in, 2, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x213:   /* 0x00469420 -> 0x00453930: its hit rectangle */
+        cmvs_menu_rect(in->menus, arg(in, 6, 5), arg(in, 6, 4),
+                       arg(in, 6, 3), arg(in, 6, 2), arg(in, 6, 1), arg(in, 6, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x214:   /* 0x00469470 -> 0x00453970: one of its four sprite states */
+        cmvs_menu_state(in->menus, arg(in, 10, 9), arg(in, 10, 8), arg(in, 10, 7),
+                        arg(in, 10, 6), arg(in, 10, 5), arg(in, 10, 4),
+                        arg(in, 10, 3), arg(in, 10, 2), arg(in, 10, 1), arg(in, 10, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x215:   /* 0x004694D0 -> 0x00453B40: the menu is built; draw it */
+        cmvs_menu_finish(in->menus, arg(in, 1, 0), in->scene);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x216:   /* 0x00469510 -> 0x00453BF0: which item is selected */
+        in->sys[0] = cmvs_menu_current(in->menus, arg(in, 1, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x217:   /* 0x00469560 -> 0x00453DC0: the frame's input, as an item */
+        in->sys[0] = cmvs_menu_poll(in->menus, arg(in, 1, 0), &in->input, in->scene);
         in->command_known[command] = 1;
         return 0;
     case 0x081: {

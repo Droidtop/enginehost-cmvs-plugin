@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include "game.h"
+#include "input.h"
 #include "scene.h"
 #include "script.h"
 
@@ -70,6 +71,12 @@ cmvs_scene *cmvs_interp_scene(cmvs_interp *in);
 /* What the commands have drawn into. The runner reads it for a screenshot; the
  * Android wrapper will read it for the frame it hands to the surface. */
 cmvs_scene *cmvs_interp_scene(cmvs_interp *in);
+
+/* Where a frontend puts the pointer and the buttons. The menus read it on
+ * command 0x217 and nothing else touches it, so a frontend that reports no
+ * input simply leaves every menu idle - which is what a headless --shot run
+ * wants. */
+cmvs_input *cmvs_interp_input(cmvs_interp *in);
 
 /* What the run did, for the desktop runner to print. */
 long cmvs_interp_statements(const cmvs_interp *in);

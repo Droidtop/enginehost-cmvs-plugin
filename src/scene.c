@@ -18,6 +18,7 @@
  */
 typedef struct {
     int used;
+    int visible;
     int mode;
     int sx, sy, sw, sh;
     int ox, oy;
@@ -51,6 +52,7 @@ static cmvs_object *object_new(void)
     o->item.alpha = 0xFF;
     o->item.opacity = 0x100;
     o->item.mode = 1;
+    o->item.visible = 1;
     return o;
 }
 
@@ -138,9 +140,17 @@ int cmvs_scene_item(cmvs_scene *s, int object, int part)
     memset(&o->item, 0, sizeof o->item);
     o->item.used = 1;
     o->item.mode = 1;
+    o->item.visible = 1;
     o->item.alpha = 0xFF;
     o->item.opacity = 0x100;
     return 1;
+}
+
+void cmvs_scene_show(cmvs_scene *s, int object, int part, int visible)
+{
+    cmvs_object *o = reach(s, object, part);
+    if (!o) return;
+    o->item.visible = visible ? 1 : 0;
 }
 
 void cmvs_scene_source(cmvs_scene *s, int object, int part, int x, int y, int w, int h)
@@ -196,7 +206,7 @@ static void draw_item(cmvs_scene *s, const cmvs_object *o, const pb3_image *from
     int dx = it->x + it->ox, dy = it->y + it->oy;
     int row, col;
 
-    if (!it->used || !from || !from->pixels) return;
+    if (!it->used || !it->visible || !from || !from->pixels) return;
     if (sw <= 0 || sh <= 0) return;
 
     for (row = 0; row < sh; row++) {

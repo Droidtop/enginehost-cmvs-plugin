@@ -67,6 +67,21 @@ int cmvs_session_frame(cmvs_session *s, char *err, size_t errlen)
 
 const uint8_t *cmvs_session_pixels(const cmvs_session *s) { return s ? s->pixels : NULL; }
 
+void cmvs_session_pointer(cmvs_session *s, int x, int y)
+{
+    if (s) cmvs_input_move(cmvs_interp_input(s->interp), x, y);
+}
+
+void cmvs_session_button(cmvs_session *s, int button, int down)
+{
+    if (s) cmvs_input_button(cmvs_interp_input(s->interp), button, down);
+}
+
+void cmvs_session_navigate(cmvs_session *s, int direction)
+{
+    if (s) cmvs_input_navigate(cmvs_interp_input(s->interp), direction);
+}
+
 const char *cmvs_session_script(const cmvs_session *s)
 {
     return s ? cmvs_interp_script(s->interp) : "";

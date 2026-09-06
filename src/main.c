@@ -304,45 +304,184 @@ static int cmd_png(const char *game, const char *wanted, const char *out_path)
  * Runs the bytecode. Everything here goes through one session, which is also
  * what the Android wrapper drives, so there is one way to start a game and the
  * desktop is not a second engine.
+ *
+ * There are two ways to drive it and they end in the same place. --window
+ * opens an SDL2 window and feeds the mouse and the arrow keys in as the
+ * pointer and the menu directions: that is the game, played. Without it the
+ * run is headless, --shot writes the last frame, and --point and --click stand
+ * in for a hand - they put the pointer somewhere and press it on a numbered
+ * frame - so a menu can be proven in a container with no display at all.
  */
-static int cmd_run(const char *folder, const char *script, int trace, long budget,
-                   int frames, const char *shot)
-{
-    char err[256] = {0};
-    cmvs_session *s = cmvs_session_open(folder, script, err, sizeof err);
-    int rc = 1, kinds = 0, missing, frame;
+typedef struct {
+    const char *script;
+    int trace;
+    long budget;
+    int frames;
+    const char *shot;
+    int window;
+    int point_x, point_y, has_point;
+    int click_frame;
+} run_options;
 
-    if (!s) { fprintf(stderr, "%s\n", err); return 1; }
-    cmvs_session_trace(s, trace);
-    cmvs_session_budget(s, budget);
-    /* The engine's own outer loop, at 0x0040CCCD: once round per frame. */
-    for (frame = 0; frame < frames && rc > 0; frame++) {
-        rc = cmvs_session_frame(s, err, sizeof err);
-        if (trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_session_script(s));
-    }
+/*
+ * The window shows the game's own screen scaled and centred, which is the same
+ * letterbox the Android view draws; this is its inverse, and it is why the
+ * engine is handed engine coordinates and never window ones.
+ */
+static void to_engine(int win_w, int win_h, int w, int h, int mx, int my, int *ex, int *ey)
+{
+    float scale = win_w / (float) w;
+    float other = win_h / (float) h;
+    if (other < scale) scale = other;
+    if (scale <= 0) scale = 1;
+    *ex = (int) ((mx - (win_w - w * scale) / 2) / scale);
+    *ey = (int) ((my - (win_h - h * scale) / 2) / scale);
+}
+
+static int report(cmvs_session *s, const run_options *o, int rc, const char *err)
+{
+    int kinds = 0, missing;
     if (rc < 0) fprintf(stderr, "stopped: %s\n", err);
-    if (shot) {
+    if (o->shot) {
         const uint8_t *pixels = cmvs_session_pixels(s);
         int w = cmvs_session_width(s), h = cmvs_session_height(s);
-        err[0] = 0;
-        if (pixels && cmvs_png_write(shot, pixels, w, h, err, sizeof err))
-            printf("%d items drawn into %s (%dx%d)\n", cmvs_session_drawn(s), shot, w, h);
+        char why[256] = {0};
+        if (pixels && cmvs_png_write(o->shot, pixels, w, h, why, sizeof why))
+            printf("%d items drawn into %s (%dx%d)\n", cmvs_session_drawn(s), o->shot, w, h);
         else
-            fprintf(stderr, "%s: %s\n", shot, err);
+            fprintf(stderr, "%s: %s\n", o->shot, why);
     }
     cmvs_session_report(s, stdout);
     missing = cmvs_session_unimplemented(s, &kinds);
     printf("%d calls to %d commands that are not implemented yet\n", missing, kinds);
-    cmvs_session_close(s);
     return rc < 0;
+}
+
+/* Headless: no window, no events, and the only input is the one the flags
+ * describe. This is the path --shot has always taken and it stays that way. */
+static int run_headless(cmvs_session *s, const run_options *o)
+{
+    char err[256] = {0};
+    int rc = 1, frame;
+
+    for (frame = 0; frame < o->frames && rc > 0; frame++) {
+        if (o->has_point) cmvs_session_pointer(s, o->point_x, o->point_y);
+        /* Press on the named frame and let go on the next one: a menu reports
+         * a click on the release, having seen the press, so the two cannot be
+         * the same frame. */
+        if (o->click_frame >= 0 && frame == o->click_frame) cmvs_session_button(s, 0, 1);
+        if (o->click_frame >= 0 && frame == o->click_frame + 1) cmvs_session_button(s, 0, 0);
+        rc = cmvs_session_frame(s, err, sizeof err);
+        if (o->trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_session_script(s));
+    }
+    return report(s, o, rc, err);
+}
+
+static int run_window(cmvs_session *s, const run_options *o)
+{
+    char err[256] = {0};
+    int w = cmvs_session_width(s), h = cmvs_session_height(s);
+    SDL_Window *window;
+    SDL_Renderer *renderer;
+    SDL_Texture *texture;
+    int rc = 1, frame = 0, alive = 1;
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        return 1;
+    }
+    window = SDL_CreateWindow("CMVS", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                              w, h, SDL_WINDOW_RESIZABLE);
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                                SDL_TEXTUREACCESS_STREAMING, w, h);
+    if (!window || !renderer || !texture) {
+        fprintf(stderr, "SDL: %s\n", SDL_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
+    while (alive) {
+        SDL_Event ev;
+        int win_w = w, win_h = h, ex, ey;
+        SDL_GetWindowSize(window, &win_w, &win_h);
+        while (SDL_PollEvent(&ev)) {
+            switch (ev.type) {
+            case SDL_QUIT:
+                alive = 0;
+                break;
+            case SDL_MOUSEMOTION:
+                to_engine(win_w, win_h, w, h, ev.motion.x, ev.motion.y, &ex, &ey);
+                cmvs_session_pointer(s, ex, ey);
+                break;
+            case SDL_MOUSEBUTTONDOWN:
+            case SDL_MOUSEBUTTONUP:
+                to_engine(win_w, win_h, w, h, ev.button.x, ev.button.y, &ex, &ey);
+                cmvs_session_pointer(s, ex, ey);
+                if (ev.button.button == SDL_BUTTON_LEFT || ev.button.button == SDL_BUTTON_RIGHT)
+                    cmvs_session_button(s, ev.button.button == SDL_BUTTON_LEFT ? 0 : 1,
+                                        ev.type == SDL_MOUSEBUTTONDOWN);
+                break;
+            case SDL_KEYDOWN:
+                /* The pad half of a menu: the poll moves its selection on a
+                 * direction and warps the pointer onto it. */
+                if (ev.key.keysym.sym == SDLK_UP) cmvs_session_navigate(s, -1);
+                else if (ev.key.keysym.sym == SDLK_DOWN) cmvs_session_navigate(s, 1);
+                else if (ev.key.keysym.sym == SDLK_RETURN) cmvs_session_button(s, 0, 1);
+                else if (ev.key.keysym.sym == SDLK_ESCAPE) alive = 0;
+                break;
+            case SDL_KEYUP:
+                if (ev.key.keysym.sym == SDLK_RETURN) cmvs_session_button(s, 0, 0);
+                break;
+            default:
+                break;
+            }
+        }
+        if (!alive) break;
+        if (rc > 0) {
+            rc = cmvs_session_frame(s, err, sizeof err);
+            if (o->trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_session_script(s));
+            frame++;
+            if (o->frames > 0 && frame >= o->frames) alive = 0;
+        }
+        SDL_UpdateTexture(texture, NULL, cmvs_session_pixels(s), 4 * w);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xFF);
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, texture, NULL, NULL);
+        SDL_RenderPresent(renderer);
+        SDL_Delay(16);
+    }
+
+    SDL_DestroyTexture(texture);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return report(s, o, rc, err);
+}
+
+static int cmd_run(const char *folder, const run_options *o)
+{
+    char err[256] = {0};
+    cmvs_session *s = cmvs_session_open(folder, o->script, err, sizeof err);
+    int rc;
+
+    if (!s) { fprintf(stderr, "%s\n", err); return 1; }
+    cmvs_session_trace(s, o->trace);
+    cmvs_session_budget(s, o->budget);
+    /* The engine's own outer loop, at 0x0040CCCD: once round per frame. */
+    rc = o->window ? run_window(s, o) : run_headless(s, o);
+    cmvs_session_close(s);
+    return rc;
 }
 
 int main(int argc, char **argv)
 {
     if (argc < 2) {
         fprintf(stderr,
-            "usage: %s <game folder> [--check [n] | --show <entry> | --bmp <entry> <out.bmp>]\n",
-            argv[0]);
+            "usage: %s <game folder> [--check [n] | --show <entry> | --bmp <entry> <out.bmp>]\n"
+            "       %s <game folder> --run [script] [-v] [-f frames] [--shot out.png]\n"
+            "                              [--window] [--point x y] [--click frame]\n",
+            argv[0], argv[0]);
         return 2;
     }
     if (argc >= 3 && !strcmp(argv[2], "--check")) {
@@ -352,18 +491,28 @@ int main(int argc, char **argv)
         return cmd_scripts(argv[1], argc >= 4 ? argv[3] : NULL);
     }
     if (argc >= 3 && !strcmp(argv[2], "--run")) {
-        const char *script = "start.ps3", *shot = NULL;
-        int trace = 0, i, frames = 60;
-        long budget = 2000000;
+        run_options o;
+        int i;
+        memset(&o, 0, sizeof o);
+        o.script = "start.ps3";
+        o.budget = 2000000;
+        o.frames = 60;
+        o.click_frame = -1;
         for (i = 3; i < argc; i++) {
-            if (!strcmp(argv[i], "-v")) trace = 1;
-            else if (!strcmp(argv[i], "-vv")) trace = 2;
-            else if (!strcmp(argv[i], "-n") && i + 1 < argc) budget = atol(argv[++i]);
-            else if (!strcmp(argv[i], "-f") && i + 1 < argc) frames = atoi(argv[++i]);
-            else if (!strcmp(argv[i], "--shot") && i + 1 < argc) shot = argv[++i];
-            else script = argv[i];
+            if (!strcmp(argv[i], "-v")) o.trace = 1;
+            else if (!strcmp(argv[i], "-vv")) o.trace = 2;
+            else if (!strcmp(argv[i], "-n") && i + 1 < argc) o.budget = atol(argv[++i]);
+            else if (!strcmp(argv[i], "-f") && i + 1 < argc) o.frames = atoi(argv[++i]);
+            else if (!strcmp(argv[i], "--shot") && i + 1 < argc) o.shot = argv[++i];
+            else if (!strcmp(argv[i], "--window")) { o.window = 1; o.frames = 0; }
+            else if (!strcmp(argv[i], "--point") && i + 2 < argc) {
+                o.point_x = atoi(argv[++i]);
+                o.point_y = atoi(argv[++i]);
+                o.has_point = 1;
+            } else if (!strcmp(argv[i], "--click") && i + 1 < argc) o.click_frame = atoi(argv[++i]);
+            else o.script = argv[i];
         }
-        return cmd_run(argv[1], script, trace, budget, frames, shot);
+        return cmd_run(argv[1], &o);
     }
     if (argc >= 4 && !strcmp(argv[2], "--show")) return cmd_show(argv[1], argv[3]);
     if (argc >= 5 && !strcmp(argv[2], "--bmp")) return cmd_png(argv[1], argv[3], argv[4]);
