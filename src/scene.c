@@ -23,7 +23,7 @@ typedef struct {
     int sx, sy, sw, sh;
     int ox, oy;
     int x, y;
-    int size;
+    int depth;                   /* +0x28: the draw order, command 0x047 */
     int alpha;
     int opacity;
 } cmvs_item;
@@ -179,6 +179,26 @@ int cmvs_scene_bitmap(cmvs_scene *s, int object, const char *name)
     return 1;
 }
 
+/*
+ * Command 0x033 (0x0045f1b0) asks an object how big its bitmap is: the object
+ * at +0x77c is reached, its image queried, and the width at +0x68, the height
+ * at +0x6c and "has an alpha channel" at +0x70 are written into the system
+ * values. The scene's scripts SIZE THEMSELVES from the answer - snky01.ps3
+ * asks before it fills in the source rectangle of a background or a character
+ * sprite - so without it the rectangle came from whatever the previous command
+ * had left behind, and the summer-sky background drew six pixels wide.
+ */
+int cmvs_scene_bitmap_size(cmvs_scene *s, int object, int part,
+                           int *width, int *height, int *has_alpha)
+{
+    cmvs_object *o = reach(s, object, part);
+    if (!o || !o->has_bitmap) return 0;
+    if (width) *width = o->bitmap.width;
+    if (height) *height = o->bitmap.height;
+    if (has_alpha) *has_alpha = o->bitmap.has_alpha ? 1 : 0;
+    return 1;
+}
+
 int cmvs_scene_item(cmvs_scene *s, int object, int part)
 {
     cmvs_object *o = reach(s, object, part);
@@ -233,11 +253,11 @@ void cmvs_scene_extent(cmvs_scene *s, int object, int part, int w, int h)
     o->eh = h;
 }
 
-void cmvs_scene_size(cmvs_scene *s, int object, int part, int size)
+void cmvs_scene_depth(cmvs_scene *s, int object, int part, int depth)
 {
     cmvs_object *o = reach(s, object, part);
     if (!o) return;
-    o->item.size = size;
+    o->item.depth = depth;
 }
 
 cmvs_text *cmvs_scene_text(cmvs_scene *s, int layer)
@@ -291,7 +311,7 @@ static void draw_item(cmvs_scene *s, const cmvs_object *o,
 {
     const cmvs_item *it = &o->item;
     int sw = it->sw, sh = it->sh, sx = it->sx, sy = it->sy;
-    int dx = ox + it->x + it->ox, dy = oy + it->y + it->oy;
+    int dx = ox + it->x - it->ox, dy = oy + it->y - it->oy;
     int row, col;
 
     if (!it->used || !it->visible || !from || !from->pixels) return;
@@ -350,7 +370,7 @@ static void draw_object(cmvs_scene *s, const cmvs_object *o,
 
 const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
 {
-    int i;
+    int i, order, any = 0;
     if (!s) return NULL;
     memset(s->frame, 0, (size_t) s->width * s->height * 4);
     s->drawn = 0;
@@ -362,8 +382,33 @@ const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
      * window over the sky and not the sky over the window. The title screen,
      * which is graphic objects alone, is unaffected either way.
      */
-    for (i = 0; i < CMVS_OBJECTS; i++)
-        if (s->object[i]) draw_object(s, s->object[i], NULL, 0, 0);
+    /*
+     * And they go down in the order command 0x047 gives them (item +0x28),
+     * not in object number: snky01.ps3 puts its background at 32 and the
+     * character sprite that stands in front of it at 99, while the sprite is
+     * object 20 and the background object 29. By number the background wins
+     * and the girl is behind her own scenery. Equal orders keep their object
+     * number as the tie-break, which is what the title screen relies on.
+     */
+    order = 0;
+    for (i = 0; i < CMVS_OBJECTS; i++) {
+        if (!s->object[i]) continue;
+        if (!any || s->object[i]->item.depth < order) order = s->object[i]->item.depth;
+        any = 1;
+    }
+    while (any) {
+        int next = 0, more = 0;
+        for (i = 0; i < CMVS_OBJECTS; i++)
+            if (s->object[i] && s->object[i]->item.depth == order)
+                draw_object(s, s->object[i], NULL, 0, 0);
+        for (i = 0; i < CMVS_OBJECTS; i++) {
+            if (!s->object[i] || s->object[i]->item.depth <= order) continue;
+            if (!more || s->object[i]->item.depth < next) next = s->object[i]->item.depth;
+            more = 1;
+        }
+        if (!more) break;
+        order = next;
+    }
     for (i = CMVS_OBJECTS + CMVS_LAYERS - 1; i >= CMVS_OBJECTS; i--) {
         int layer = i - CMVS_OBJECTS;
         const cmvs_object *o = s->object[i];

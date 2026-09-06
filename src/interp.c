@@ -922,6 +922,25 @@ static int command_builtin(cmvs_interp *in, int command)
                                        string_text(in, arg(in, 2, 0)));
         in->command_known[command] = 1;
         return 0;
+    case 0x033: {
+        /*
+         * 0x0045f1b0: how big is the bitmap this object holds? sys[0] is one
+         * when there is an image at all (0x13d34), sys[1] its width (+0x68 of
+         * the image, into 0x13d38), sys[2] its height (+0x6c, into 0x13d3c)
+         * and sys[3] whether it carries alpha (+0x70, into 0x13d40).
+         * snky01.ps3 asks this of every background and every character sprite
+         * before it writes the source rectangle, so an unanswered 0x033 is
+         * what made the scene draw a six-pixel-wide sliver of its sky.
+         */
+        int w = 0, h = 0, alpha = 0;
+        int got = cmvs_scene_bitmap_size(in->scene, arg(in, 1, 0), -1, &w, &h, &alpha);
+        in->sys[0] = got ? 1 : 0;
+        in->sys[1] = w;
+        in->sys[2] = h;
+        in->sys[3] = alpha;
+        in->command_known[command] = 1;
+        return 0;
+    }
     case 0x040:   /* 0x0045f650: give the object a draw item (0x434970) */
         in->command_known[command] = cmvs_scene_item(in->scene, arg(in, 1, 0), -1);
         return 0;
@@ -944,8 +963,8 @@ static int command_builtin(cmvs_interp *in, int command)
                           arg(in, 4, 1), arg(in, 4, 0));
         in->command_known[command] = 1;
         return 0;
-    case 0x047:   /* 0x0045fb10 -> 0x41bda0: one size */
-        cmvs_scene_size(in->scene, arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0));
+    case 0x047:   /* 0x0045fb10 -> 0x41bda0: the draw order */
+        cmvs_scene_depth(in->scene, arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0));
         in->command_known[command] = 1;
         return 0;
     /* ------------------------------------------------------- layer sprites */
@@ -1003,7 +1022,7 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = 1;
         return 0;
     case 0x184:   /* 0x00467b20 -> 0x00433380 -> 0x41bda0: one size */
-        cmvs_scene_size(in->scene, CMVS_LAYER_OBJECT(arg(in, 3, 2)),
+        cmvs_scene_depth(in->scene, CMVS_LAYER_OBJECT(arg(in, 3, 2)),
                         arg(in, 3, 1), arg(in, 3, 0));
         in->command_known[command] = 1;
         return 0;
