@@ -52,6 +52,16 @@ struct cmvs_interp {
     int frame_ms;
 
     /*
+     * How many times a menu poll has answered with an item, and which item the
+     * last one was. Nothing in the engine reads these: they are here so a
+     * frontend can say in its log that a press reached the menu and what it
+     * selected, which on a console is the difference between input that never
+     * arrived and a menu that ignored it.
+     */
+    int menu_events;
+    int menu_last;
+
+    /*
      * The 64 registered procedures at +0x33c8, 0x1c bytes apiece. Command
      * 0x088 puts the current script and a label into one of them and command
      * 0x08a calls it: this is how a script hands the engine a piece of itself
@@ -122,6 +132,12 @@ void cmvs_interp_free(cmvs_interp *in)
 void cmvs_interp_trace(cmvs_interp *in, int on) { in->trace = on; }
 cmvs_scene *cmvs_interp_scene(cmvs_interp *in) { return in->scene; }
 cmvs_input *cmvs_interp_input(cmvs_interp *in) { return in ? &in->input : NULL; }
+int cmvs_interp_menu_events(const cmvs_interp *in, int *last_item)
+{
+    if (last_item) *last_item = in ? in->menu_last : -1;
+    return in ? in->menu_events : 0;
+}
+
 long cmvs_interp_statements(const cmvs_interp *in) { return in->statements; }
 
 static const cmvs_script *code(const cmvs_interp *in)
@@ -941,6 +957,10 @@ static int command_builtin(cmvs_interp *in, int command)
         return 0;
     case 0x217:   /* 0x00469560 -> 0x00453DC0: the frame's input, as an item */
         in->sys[0] = cmvs_menu_poll(in->menus, arg(in, 1, 0), &in->input, in->scene);
+        if (in->sys[0] >= 0) {
+            in->menu_events++;
+            in->menu_last = in->sys[0];
+        }
         in->command_known[command] = 1;
         return 0;
     case 0x081: {

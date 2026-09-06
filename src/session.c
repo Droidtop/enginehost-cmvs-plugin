@@ -87,6 +87,12 @@ const char *cmvs_session_script(const cmvs_session *s)
     return s ? cmvs_interp_script(s->interp) : "";
 }
 
+int cmvs_session_menu_events(const cmvs_session *s, int *last_item)
+{
+    if (!s) { if (last_item) *last_item = -1; return 0; }
+    return cmvs_interp_menu_events(s->interp, last_item);
+}
+
 long cmvs_session_statements(const cmvs_session *s)
 {
     return s ? cmvs_interp_statements(s->interp) : 0;

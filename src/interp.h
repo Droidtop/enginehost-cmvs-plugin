@@ -78,6 +78,11 @@ cmvs_scene *cmvs_interp_scene(cmvs_interp *in);
  * wants. */
 cmvs_input *cmvs_interp_input(cmvs_interp *in);
 
+/* How many menu polls have answered with an item, and which item the last one
+ * was, so a frontend's log can tell a press that arrived from one that did
+ * not. */
+int cmvs_interp_menu_events(const cmvs_interp *in, int *last_item);
+
 /* What the run did, for the desktop runner to print. */
 long cmvs_interp_statements(const cmvs_interp *in);
 int cmvs_interp_unimplemented(const cmvs_interp *in, int *distinct);

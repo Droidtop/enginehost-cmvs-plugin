@@ -50,6 +50,13 @@ const char *cmvs_session_script(const cmvs_session *s);
 long cmvs_session_statements(const cmvs_session *s);
 int cmvs_session_drawn(const cmvs_session *s);
 
+/*
+ * How many times a menu has answered a press with an item, and which item the
+ * last one was. A frontend logs this: on a console it is the one thing that
+ * separates "the tap never reached the engine" from "the menu saw it".
+ */
+int cmvs_session_menu_events(const cmvs_session *s, int *last_item);
+
 /* Development handles: statement tracing and the command report. */
 void cmvs_session_trace(cmvs_session *s, int on);
 void cmvs_session_budget(cmvs_session *s, long statements_per_frame);
