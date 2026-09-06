@@ -37,7 +37,14 @@ struct cmvs_interp {
     cmvs_slot slot[MAX_SLOTS];
     int current;                 /* +0x3390 */
     int pc;                      /* +0x3394 */
-    int caller_slot;             /* +0x3398 */
+    /*
+     * +0x3398, and it is not a slot: 0x0045AC97 increments it every time a
+     * command returns bit 0x2000 and zeroes it on every other return, so it
+     * counts the frames a repeating command has been repeating for.
+     * 0x00463560 saves it on the frame it builds and 0x0414 restores it,
+     * which is why it travels with a call.
+     */
+    int repeat;
 
     uint8_t stack[STACK_BYTES];  /* +0x13c20 */
     int sp;                      /* +0x13c24, a byte offset */
@@ -776,12 +783,23 @@ static int do_command(cmvs_interp *in, int command)
         int abi = (command >= 0 && command < CMVS_COMMANDS) ? cmvs_command_abi[command] : -1;
         int flags = command_builtin(in, command);
         if (abi < 0) abi = CMVS_CMD_ADVANCE;   /* extractor gap; see commands.c */
-        flags |= abi;
-        /* The argument pop is the engine's own bookkeeping at 0x45AC55, done
-         * whether or not the command itself is implemented. */
-        in->sp -= CMVS_CMD_ARGS(flags);
-        if (in->sp < 0) in->sp = 0;
+        /* A handler that answers with CMVS_CMD_REPEAT has decided its own
+         * return and the table's single constant does not apply to it. */
+        if (!(flags & CMVS_CMD_REPEAT)) flags |= abi;
+        /*
+         * The argument pop is the engine's own bookkeeping and it belongs to
+         * the SAME branch as the pc step: 0x0045AC80 tests bit 0x4000 and only
+         * then does it add two to the pc and subtract the low byte from the
+         * stack pointer. A command that does not step past itself has not
+         * consumed its arguments either, which is exactly what lets a wait
+         * re-enter next frame with them still under the stack top.
+         */
+        if (flags & CMVS_CMD_ADVANCE) {
+            in->sp -= CMVS_CMD_ARGS(flags);
+            if (in->sp < 0) in->sp = 0;
+        }
         if (flags & CMVS_CMD_STOP) in->running = 0;
+        in->repeat = (flags & CMVS_CMD_REPEAT) ? in->repeat + 1 : 0;
         return flags;
     }
 }
@@ -1083,10 +1101,10 @@ static int command_builtin(cmvs_interp *in, int command)
         in->pc += 2;
         in->sp -= 4;
         if (in->sp < 0) in->sp = 0;
-        push(in, in->caller_slot);
+        push(in, in->repeat);
         push(in, in->pc);
         push(in, in->current);
-        in->caller_slot = 0;
+        in->repeat = 0;
         in->pc = in->proc[which].pc;
         if (in->proc[which].slot >= 0 && in->proc[which].slot < MAX_SLOTS
             && in->slot[in->proc[which].slot].loaded)
@@ -1290,7 +1308,7 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
         case 0x0414: {
             int slot = pop(in);
             int back = pop(in);
-            in->caller_slot = pop(in);
+            in->repeat = pop(in);
             if (slot >= 0 && slot < MAX_SLOTS && in->slot[slot].loaded) in->current = slot;
             in->pc = back;
             if (in->depth > 0) in->depth--;
