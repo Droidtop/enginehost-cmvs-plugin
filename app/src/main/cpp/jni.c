@@ -107,6 +107,66 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeFrame(JNIEnv *env, jclass klass
     return rc > 0 ? JNI_TRUE : JNI_FALSE;
 }
 
+/*
+ * Input. The engine wants the pointer in the GAME's coordinates, so the
+ * conversion from the view's belongs to the plugin, which is the only part
+ * that knows how the picture sits on the console's screen; this file just
+ * carries the numbers across.
+ *
+ * The first pointer and the first button of a session are logged, because on
+ * hardware the question is always whether the touch reached the engine at all,
+ * and a log that only ever fires twice cannot drown the rest.
+ */
+static int logged_pointer;
+static int logged_button;
+
+JNIEXPORT void JNICALL
+Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativePointer(JNIEnv *env, jclass klass,
+                                                         jlong handle, jint x, jint y)
+{
+    cmvs_session *session = (cmvs_session *) (intptr_t) handle;
+    if (session == NULL) return;
+    if (!logged_pointer) {
+        logged_pointer = 1;
+        __android_log_print(ANDROID_LOG_INFO, TAG, "pointer reached the engine at %d,%d", x, y);
+    }
+    cmvs_session_pointer(session, x, y);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeButton(JNIEnv *env, jclass klass,
+                                                        jlong handle, jint button, jboolean down)
+{
+    cmvs_session *session = (cmvs_session *) (intptr_t) handle;
+    if (session == NULL) return;
+    if (!logged_button) {
+        logged_button = 1;
+        __android_log_print(ANDROID_LOG_INFO, TAG, "button %d reached the engine", button);
+    }
+    cmvs_session_button(session, button, down == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeNavigate(JNIEnv *env, jclass klass,
+                                                          jlong handle, jint direction)
+{
+    cmvs_session *session = (cmvs_session *) (intptr_t) handle;
+    if (session == NULL) return;
+    cmvs_session_navigate(session, direction);
+}
+
+/* Packs the two answers into one call so the frame loop asks once: the count of
+ * menu items that have fired in the low bits, the last item in the high ones. */
+JNIEXPORT jint JNICALL
+Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeMenuEvents(JNIEnv *env, jclass klass, jlong handle)
+{
+    cmvs_session *session = (cmvs_session *) (intptr_t) handle;
+    int last = -1, count;
+    if (session == NULL) return 0;
+    count = cmvs_session_menu_events(session, &last);
+    return (jint) ((count & 0xFFFF) | ((last & 0xFF) << 16));
+}
+
 JNIEXPORT jstring JNICALL
 Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeScript(JNIEnv *env, jclass klass, jlong handle)
 {
