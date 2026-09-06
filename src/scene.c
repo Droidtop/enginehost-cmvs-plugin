@@ -32,6 +32,7 @@ typedef struct cmvs_object {
     cmvs_item item;
     pb3_image bitmap;
     int has_bitmap;
+    int ew, eh;                  /* +0xc44, +0xc48: the object's own extent */
     struct cmvs_object **part;   /* CMVS_PARTS pointers, allocated with the object */
 } cmvs_object;
 
@@ -39,7 +40,10 @@ struct cmvs_scene {
     cmvs_game *game;
     int width, height;
     uint8_t *frame;              /* BGRA, 4 * width * height */
-    cmvs_object *object[CMVS_OBJECTS];
+    /* The 256 graphic objects, then the 8 layer objects: one table, because
+     * 0x00451d30 reaches a layer's sprites with the object family's own
+     * accessor and there is nothing to tell apart below that call. */
+    cmvs_object *object[CMVS_OBJECTS + CMVS_LAYERS];
     int drawn;                   /* how many items the last compose blitted */
 };
 
@@ -84,7 +88,7 @@ void cmvs_scene_free(cmvs_scene *s)
 {
     int i;
     if (!s) return;
-    for (i = 0; i < CMVS_OBJECTS; i++) object_free(s->object[i]);
+    for (i = 0; i < CMVS_OBJECTS + CMVS_LAYERS; i++) object_free(s->object[i]);
     free(s->frame);
     free(s);
 }
@@ -94,7 +98,7 @@ void cmvs_scene_free(cmvs_scene *s)
 static cmvs_object *reach(cmvs_scene *s, int object, int part)
 {
     cmvs_object *o;
-    if (object < 0 || object >= CMVS_OBJECTS) return NULL;
+    if (object < 0 || object >= CMVS_OBJECTS + CMVS_LAYERS) return NULL;
     o = s->object[object];
     if (!o || part < 0) return o;
     if (part >= CMVS_PARTS) return NULL;
@@ -103,7 +107,7 @@ static cmvs_object *reach(cmvs_scene *s, int object, int part)
 
 int cmvs_scene_object(cmvs_scene *s, int object)
 {
-    if (object < 0 || object >= CMVS_OBJECTS) return 0;
+    if (object < 0 || object >= CMVS_OBJECTS + CMVS_LAYERS) return 0;
     object_free(s->object[object]);
     s->object[object] = object_new();
     return s->object[object] != NULL;
@@ -112,12 +116,47 @@ int cmvs_scene_object(cmvs_scene *s, int object)
 int cmvs_scene_part(cmvs_scene *s, int object, int part)
 {
     cmvs_object *o;
-    if (object < 0 || object >= CMVS_OBJECTS || part < 0 || part >= CMVS_PARTS) return 0;
+    if (object < 0 || object >= CMVS_OBJECTS + CMVS_LAYERS
+        || part < 0 || part >= CMVS_PARTS) return 0;
     o = s->object[object];
     if (!o) return 0;
     object_free(o->part[part]);
     o->part[part] = object_new();
     return o->part[part] != NULL;
+}
+
+void cmvs_scene_drop(cmvs_scene *s, int object, int part)
+{
+    if (object < 0 || object >= CMVS_OBJECTS + CMVS_LAYERS) return;
+    if (part < 0) {
+        object_free(s->object[object]);
+        s->object[object] = NULL;
+        return;
+    }
+    if (!s->object[object] || part >= CMVS_PARTS) return;
+    object_free(s->object[object]->part[part]);
+    s->object[object]->part[part] = NULL;
+}
+
+void cmvs_scene_drop_all(cmvs_scene *s)
+{
+    int i;
+    /* 0x0045ea10 walks the 256 graphic objects and nothing else: the layers
+     * keep what they hold, which is why clearing the interface does not clear
+     * the scene under it. */
+    for (i = 0; i < CMVS_OBJECTS; i++) {
+        object_free(s->object[i]);
+        s->object[i] = NULL;
+    }
+}
+
+int cmvs_scene_exists(const cmvs_scene *s, int object, int part)
+{
+    if (object < 0 || object >= CMVS_OBJECTS + CMVS_LAYERS) return 0;
+    if (!s->object[object]) return 0;
+    if (part < 0) return 1;
+    if (part >= CMVS_PARTS) return 0;
+    return s->object[object]->part[part] != NULL;
 }
 
 int cmvs_scene_bitmap(cmvs_scene *s, int object, const char *name)
@@ -179,6 +218,14 @@ void cmvs_scene_offset(cmvs_scene *s, int object, int part, int x, int y)
     o->item.oy = y;
 }
 
+void cmvs_scene_extent(cmvs_scene *s, int object, int part, int w, int h)
+{
+    cmvs_object *o = reach(s, object, part);
+    if (!o) return;
+    o->ew = w;
+    o->eh = h;
+}
+
 void cmvs_scene_size(cmvs_scene *s, int object, int part, int size)
 {
     cmvs_object *o = reach(s, object, part);
@@ -199,11 +246,12 @@ static void blend(uint8_t *dst, const uint8_t *src, int alpha)
     dst[3] = 0xFF;
 }
 
-static void draw_item(cmvs_scene *s, const cmvs_object *o, const pb3_image *from)
+static void draw_item(cmvs_scene *s, const cmvs_object *o,
+                      const pb3_image *from, int ox, int oy)
 {
     const cmvs_item *it = &o->item;
     int sw = it->sw, sh = it->sh, sx = it->sx, sy = it->sy;
-    int dx = it->x + it->ox, dy = it->y + it->oy;
+    int dx = ox + it->x + it->ox, dy = oy + it->y + it->oy;
     int row, col;
 
     if (!it->used || !it->visible || !from || !from->pixels) return;
@@ -223,17 +271,29 @@ static void draw_item(cmvs_scene *s, const cmvs_object *o, const pb3_image *from
     s->drawn++;
 }
 
-/* An object draws itself and then its parts, in index order; a part with no
+/*
+ * An object draws itself and then its parts, in index order; a part with no
  * bitmap of its own draws out of the nearest one above it, which is what makes
- * a sheet of buttons work. */
-static void draw_object(cmvs_scene *s, const cmvs_object *o, const pb3_image *inherited)
+ * a sheet of buttons work.
+ *
+ * A part's position is its PARENT'S, plus its own. In the engine the parts are
+ * composed into the parent object's own surface - the one 0x17c gives an extent
+ * - and that surface is then drawn where the parent sits, so a part never knows
+ * where on the screen it ends up. The typed line is what shows it: snky01.ps3
+ * lays its glyph sprites out at x = 0, 30, 60, ... and y = 0, and they belong
+ * inside a message window whose object sits at y = 540.
+ */
+static void draw_object(cmvs_scene *s, const cmvs_object *o,
+                        const pb3_image *inherited, int ox, int oy)
 {
     const pb3_image *from = o->has_bitmap ? &o->bitmap : inherited;
     int i;
     if (!o) return;
-    draw_item(s, o, from);
+    draw_item(s, o, from, ox, oy);
+    ox += o->item.x + o->item.ox;
+    oy += o->item.y + o->item.oy;
     for (i = 0; i < CMVS_PARTS; i++)
-        if (o->part[i]) draw_object(s, o->part[i], from);
+        if (o->part[i]) draw_object(s, o->part[i], from, ox, oy);
 }
 
 const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
@@ -242,8 +302,12 @@ const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
     if (!s) return NULL;
     memset(s->frame, 0, (size_t) s->width * s->height * 4);
     s->drawn = 0;
+    /* The layers carry the played scene and the graphic objects the interface
+     * the player reads over it, so the layers go down first. */
+    for (i = CMVS_OBJECTS + CMVS_LAYERS - 1; i >= CMVS_OBJECTS; i--)
+        if (s->object[i]) draw_object(s, s->object[i], NULL, 0, 0);
     for (i = 0; i < CMVS_OBJECTS; i++)
-        if (s->object[i]) draw_object(s, s->object[i], NULL);
+        if (s->object[i]) draw_object(s, s->object[i], NULL, 0, 0);
     if (width) *width = s->width;
     if (height) *height = s->height;
     return s->frame;

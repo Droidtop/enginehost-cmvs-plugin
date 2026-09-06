@@ -845,6 +845,18 @@ static int command_builtin(cmvs_interp *in, int command)
     case 0x020:   /* 0x0045e8f0: a fresh object in the table at +0x77c */
         in->command_known[command] = cmvs_scene_object(in->scene, arg(in, 1, 0));
         return 0;
+    case 0x021:   /* 0x0045e9b0: and the object is gone, parts and all */
+        cmvs_scene_drop(in->scene, arg(in, 1, 0), -1);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x02F:   /* 0x0045ea10: all 256 of them, the layers untouched */
+        cmvs_scene_drop_all(in->scene);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x027:   /* 0x0045eb50: is it there? The script asks before it draws */
+        in->sys[0] = cmvs_scene_exists(in->scene, arg(in, 2, 1), arg(in, 2, 0));
+        in->command_known[command] = 1;
+        return 0;
     case 0x022:   /* 0x00433cb0: a fresh part, an object of the same class */
         in->command_known[command] =
             cmvs_scene_part(in->scene, arg(in, 2, 1), arg(in, 2, 0));
@@ -878,6 +890,70 @@ static int command_builtin(cmvs_interp *in, int command)
         return 0;
     case 0x047:   /* 0x0045fb10 -> 0x41bda0: one size */
         cmvs_scene_size(in->scene, arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0));
+        in->command_known[command] = 1;
+        return 0;
+    /* ------------------------------------------------------- layer sprites */
+    /*
+     * The eight display layers, and the family the played scene is made of.
+     * Every one of these handlers does the same two things before anything
+     * else: it refuses a layer index of 8 or more, and it turns (layer, id)
+     * into an object through 0x00451d30 - the layer's own graphic object for
+     * id -1, otherwise that object's part `id`. So each command below is the
+     * object command of the same shape addressed at CMVS_LAYER_OBJECT(layer),
+     * and the geometry setters are literally the same four routines that
+     * commands 0x044 to 0x047 reach (0x41bd00, 0x41bd40, 0x41bd60, 0x41bda0).
+     */
+    case 0x170:   /* 0x00467510: the layer object's own bitmap (0x420840) */
+        in->command_known[command] =
+            cmvs_scene_bitmap(in->scene, CMVS_LAYER_OBJECT(arg(in, 2, 1)),
+                              string_text(in, arg(in, 2, 0)));
+        return 0;
+    case 0x178: {   /* 0x004676e0 -> 0x00451d60: a fresh sprite, or the layer */
+        int32_t layer = arg(in, 2, 1), id = arg(in, 2, 0);
+        in->command_known[command] = id < 0
+            ? cmvs_scene_object(in->scene, CMVS_LAYER_OBJECT(layer))
+            : cmvs_scene_part(in->scene, CMVS_LAYER_OBJECT(layer), id);
+        return 0;
+    }
+    case 0x179:   /* 0x00467720 -> 0x00451e30: and the sprite is gone */
+        cmvs_scene_drop(in->scene, CMVS_LAYER_OBJECT(arg(in, 2, 1)),
+                        arg(in, 2, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x17A:   /* 0x00467760 -> 0x00432b70: shown or not */
+        cmvs_scene_show(in->scene, CMVS_LAYER_OBJECT(arg(in, 3, 2)),
+                        arg(in, 3, 1), arg(in, 3, 0) != 0);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x17C:   /* 0x00467810 -> 0x004337a0: the object's extent */
+        cmvs_scene_extent(in->scene, CMVS_LAYER_OBJECT(arg(in, 4, 3)),
+                          arg(in, 4, 2), arg(in, 4, 1), arg(in, 4, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x180:   /* 0x00467910 -> 0x00434970: give the sprite a draw item */
+        in->command_known[command] =
+            cmvs_scene_item(in->scene, CMVS_LAYER_OBJECT(arg(in, 2, 1)),
+                            arg(in, 2, 0));
+        return 0;
+    case 0x182:   /* 0x00467a40 -> 0x00433310 -> 0x41bd00: the source rectangle */
+        cmvs_scene_source(in->scene, CMVS_LAYER_OBJECT(arg(in, 6, 5)),
+                          arg(in, 6, 4), arg(in, 6, 3), arg(in, 6, 2),
+                          arg(in, 6, 1), arg(in, 6, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x183:   /* 0x00467ac0 -> 0x00433340 -> 0x41bd60: where it lands */
+        cmvs_scene_at(in->scene, CMVS_LAYER_OBJECT(arg(in, 4, 3)),
+                      arg(in, 4, 2), arg(in, 4, 1), arg(in, 4, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x184:   /* 0x00467b20 -> 0x00433380 -> 0x41bda0: one size */
+        cmvs_scene_size(in->scene, CMVS_LAYER_OBJECT(arg(in, 3, 2)),
+                        arg(in, 3, 1), arg(in, 3, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x185:   /* 0x00467b80 -> 0x00433330 -> 0x41bd40: an offset on top */
+        cmvs_scene_offset(in->scene, CMVS_LAYER_OBJECT(arg(in, 4, 3)),
+                          arg(in, 4, 2), arg(in, 4, 1), arg(in, 4, 0));
         in->command_known[command] = 1;
         return 0;
     /* --------------------------------------------- registered procedures */

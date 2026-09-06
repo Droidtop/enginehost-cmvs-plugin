@@ -19,6 +19,15 @@
  * title01_chip.pb3 is 1280x1024, the top 1280x720 is the title art and the
  * strip at y=722 holds the START / LOAD / SYSTEM / EXIT captions in their three
  * states, 300x60 apiece.
+ *
+ * The EIGHT DISPLAY LAYERS are the same family, not a second one. 0x00451d30
+ * is how every layer command reaches what it acts on, and all it does is take
+ * the layer's own graphic object at +0x9d8 and, for a sprite id of 0 or more,
+ * ask it for that child part through 0x00432bd0 - the very call the object
+ * commands use. So "sprite N on layer L" is "part N of the object belonging to
+ * layer L", and a sprite id of -1 is the layer object itself, exactly as -1
+ * means the object itself in the 0x04x commands. The layers live at the end of
+ * the same table here so that one set of accessors serves both.
  */
 #ifndef CMVS_SCENE_H
 #define CMVS_SCENE_H
@@ -29,7 +38,12 @@
 #include "game.h"
 
 #define CMVS_OBJECTS 256      /* the table at +0x77c */
+#define CMVS_LAYERS  8        /* the table at +0xb90 */
 #define CMVS_PARTS   0x300    /* the bound every accessor checks */
+
+/* Where layer L's graphic object lives in the same table. Every layer command
+ * turns its layer argument into this and then speaks the object vocabulary. */
+#define CMVS_LAYER_OBJECT(layer) (CMVS_OBJECTS + (layer))
 
 typedef struct cmvs_scene cmvs_scene;
 
@@ -40,6 +54,21 @@ void cmvs_scene_free(cmvs_scene *s);
  * replace whatever was there, exactly as the engine's do. */
 int cmvs_scene_object(cmvs_scene *s, int object);
 int cmvs_scene_part(cmvs_scene *s, int object, int part);
+
+/* Commands 0x021 (0x0045e9b0), 0x02f (0x0045ea10) and 0x179 (0x00451e30): the
+ * other half of creating one. A part index of -1 drops the object itself, and
+ * with it every part it holds. */
+void cmvs_scene_drop(cmvs_scene *s, int object, int part);
+void cmvs_scene_drop_all(cmvs_scene *s);
+
+/* Command 0x027 (0x0045eb50): whether that object, or that part of it, is
+ * there. The script asks before it draws. */
+int cmvs_scene_exists(const cmvs_scene *s, int object, int part);
+
+/* Commands 0x17c (0x004337a0): the object's own extent, +0xc44 and +0xc48. It
+ * is what a layer object is drawn at when it has no source rectangle of its
+ * own, which is how the message window covers the screen. */
+void cmvs_scene_extent(cmvs_scene *s, int object, int part, int w, int h);
 
 /* Command 0x030: decode a PB3 and attach it. Returns 0 if the name is not in
  * any archive, which is what the command reports back to the script. */
