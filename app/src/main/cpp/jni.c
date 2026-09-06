@@ -113,12 +113,14 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeFrame(JNIEnv *env, jclass klass
  * that knows how the picture sits on the console's screen; this file just
  * carries the numbers across.
  *
- * The first pointer and the first button of a session are logged, because on
- * hardware the question is always whether the touch reached the engine at all,
- * and a log that only ever fires twice cannot drown the rest.
+ * The first pointer of a session is logged, and then every press with the
+ * position it landed on. On hardware a tap that misses looks exactly like one
+ * that never arrived unless the log carries the coordinates of each press, and
+ * a press per tap is a handful of lines, not a flood.
  */
+static int pointer_x;
+static int pointer_y;
 static int logged_pointer;
-static int logged_button;
 
 JNIEXPORT void JNICALL
 Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativePointer(JNIEnv *env, jclass klass,
@@ -126,6 +128,8 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativePointer(JNIEnv *env, jclass kla
 {
     cmvs_session *session = (cmvs_session *) (intptr_t) handle;
     if (session == NULL) return;
+    pointer_x = x;
+    pointer_y = y;
     if (!logged_pointer) {
         logged_pointer = 1;
         __android_log_print(ANDROID_LOG_INFO, TAG, "pointer reached the engine at %d,%d", x, y);
@@ -139,9 +143,9 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeButton(JNIEnv *env, jclass klas
 {
     cmvs_session *session = (cmvs_session *) (intptr_t) handle;
     if (session == NULL) return;
-    if (!logged_button) {
-        logged_button = 1;
-        __android_log_print(ANDROID_LOG_INFO, TAG, "button %d reached the engine", button);
+    if (down == JNI_TRUE) {
+        __android_log_print(ANDROID_LOG_INFO, TAG, "button %d pressed at %d,%d",
+                            button, pointer_x, pointer_y);
     }
     cmvs_session_button(session, button, down == JNI_TRUE);
 }

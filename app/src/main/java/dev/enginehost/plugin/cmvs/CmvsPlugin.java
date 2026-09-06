@@ -226,6 +226,23 @@ public final class CmvsPlugin implements EnginePlugin {
             return Math.min(getWidth() / (float) width, getHeight() / (float) height);
         }
 
+        /**
+         * Says once, in the log, exactly how the picture sits on this console's
+         * screen: the view's size, the scale and the letterbox margins. Anyone
+         * who has to aim a tap at something in the game's own 1280x720 picture
+         * can then compute where it is on the screen instead of guessing at a
+         * scaling, which is what made a device run miss the START caption.
+         */
+        @Override protected void onSizeChanged(int w, int h, int oldW, int oldH) {
+            super.onSizeChanged(w, h, oldW, oldH);
+            float scale = Math.min(w / (float) width, h / (float) height);
+            session.host().log(Log.INFO, "cmvs",
+                    "view " + w + "x" + h + ", picture " + width + "x" + height
+                            + " at scale " + scale + ", margins "
+                            + ((w - width * scale) / 2) + "," + ((h - height * scale) / 2)
+                            + " (screen = margin + game * scale)", null);
+        }
+
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
             float scale = scale();
