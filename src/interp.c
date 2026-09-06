@@ -366,7 +366,7 @@ static int32_t resolve(cmvs_interp *in, int token, int32_t operand)
         return (operand >= 0 && operand < (int32_t) (sizeof in->sys / sizeof in->sys[0]))
              ? in->sys[operand] : 0;
     /*
-     * The four string operands evaluate to NOTHING. Each appends its text to
+     * The FIVE string operands evaluate to NOTHING. Each appends its text to
      * the accumulator and falls into `mov eax, edi` with edi zeroed at the top
      * of the resolver, which is how concatenation is expressed without a value
      * ever carrying the text.
@@ -374,7 +374,17 @@ static int32_t resolve(cmvs_interp *in, int token, int32_t operand)
     case 0x120: case 0x121: case 0x125: case 0x127:
         string_append(in, string_text(in, string_handle(in, token, operand)));
         return 0;
-    case 0x122: return stack_get(in, stack_get(in, base - operand));
+    /*
+     * 0x122 is not an integer local. Its handler (0x0045822a) reads a local
+     * BELOW the frame, treats what it finds as a string handle - it switches on
+     * the same top two bits string_text does, at 0x45827c / 0x458272 /
+     * 0x45828d / 0x4582be - and appends the text it names. That is how a script
+     * name reaches a called procedure: the caller pushes the handle, the callee
+     * says `gstring[n] = arg` and the assignment copies the text across.
+     */
+    case 0x122:
+        string_append(in, string_text(in, stack_get(in, base - operand)));
+        return 0;
     case 0x129: return float_stack(in, base - operand);
     case 0x12B:
         return (operand >= 0 && operand < FGLOBALS) ? (int32_t) in->fglobals[operand] : 0;
@@ -1126,7 +1136,25 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
             in->pc = in->acc;
             break;
         case 0x0430: push(in, in->acc); in->pc += 2; break;
-        case 0x0440: case 0x0442: push(in, dword_at(in, in->pc + 4)); in->pc += 8; break;
+        case 0x0440: case 0x0442: {
+            /*
+             * 0x0045abdc and 0x0045ac1a: a local, and NOT a push. It writes the
+             * dword at pc+4 into the slot the stack pointer is on and then
+             * raises the pointer by the WORD AT pc+2, which is the local's size
+             * in bytes - four for a number, but 0x18 for a string buffer, which
+             * is what makes 0x127 (a string above the frame) possible. Treating
+             * every one of them as four bytes left the frame short by the
+             * difference, so the epilogue's own drop unwound past the return
+             * address and the pc landed in the middle of an expression. The
+             * float form differs only in storing through the FPU, which for a
+             * value that is already four bytes is the same four bytes.
+             */
+            stack_set(in, in->sp, dword_at(in, in->pc + 4));
+            in->sp += word_at(in, in->pc + 2);
+            if (in->sp > STACK_BYTES - 4) in->sp = STACK_BYTES - 4;
+            in->pc += 8;
+            break;
+        }
         default:
             in->pc += 2;   /* the engine skips any word its tables do not match */
             break;
