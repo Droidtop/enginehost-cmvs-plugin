@@ -1014,18 +1014,30 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = t != NULL;
         return 0;
     }
-    case 0x150: { /* 0x00466df0 -> 0x00452750: move the box itself */
-        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 4, 3));
-        int mode = arg(in, 4, 2), x = arg(in, 4, 1), y = arg(in, 4, 0);
-        if (t) {
-            /* Mode 1 is relative to where the box already is; anything else
-             * puts it there. The size is untouched either way. */
-            if (mode == 1) cmvs_text_box(t, t->rx + x, t->ry + y, t->rw, t->rh);
-            else cmvs_text_box(t, x, y, t->rw, t->rh);
-        }
-        in->command_known[command] = t != NULL;
+    case 0x150:
+        /*
+         * 0x00466df0 -> 0x00452750, and it is NOT the text box: it moves the
+         * whole LAYER. The routine writes the layer's own x and y at +0xc and
+         * +0x10 and hands the same pair to the layer's graphic object
+         * (0x00433340) and to its text object (0x004503e0, which scales the
+         * pair by +0x144/+0x14c first). Mode 1 adds to what is there, mode 0
+         * replaces it, and the box and the pen are never touched.
+         *
+         * What was here before moved the BOX and, because 0x00450420 puts the
+         * pen back to the box's corner, took the pen with it: snky01.ps3's
+         * second line asks for (-1174, -2853) and every glyph of it landed
+         * two and a half screens above the window. Doing nothing is closer to
+         * the engine than doing the wrong thing, and it leaves the line where
+         * 0x145 and 0x14f put it - inside the message window.
+         *
+         * Acting on it properly means giving the layer a position of its own
+         * and finding what computes the argument: the same call site asks for
+         * (595, 612) the first time round and (295, -198) the second, and
+         * neither is where this game's message window sits, so a command that
+         * is still missing is feeding it. Left unimplemented, and counted as
+         * such, until that is known.
+         */
         return 0;
-    }
     case 0x152: { /* 0x00466e90 -> 0x004523e0 -> 0x00451120: write the line */
         cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
         const char *text = string_text(in, arg(in, 3, 0));
