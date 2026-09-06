@@ -40,6 +40,13 @@ const char *cpz_scheme_name(const cpz_archive *a);
 int cpz_count(const cpz_archive *a);
 const cpz_entry *cpz_at(const cpz_archive *a, int index);
 const cpz_entry *cpz_find(const cpz_archive *a, const char *name);
+/*
+ * The same, matching only the LEAF of a stored path. Every archive files its
+ * entries under a directory, but not one that can be derived from the archive:
+ * bg.cpz uses "pb3/", chip.cpz "chip/", and stand/up/balloon a folder per
+ * chapter ("01_..."). The bytecode names the leaf alone.
+ */
+const cpz_entry *cpz_find_leaf(const cpz_archive *a, const char *name);
 
 /*
  * Reads one entry, decrypted, and unpacked if it is a PS2A container. A PB3B

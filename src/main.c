@@ -200,32 +200,25 @@ static int cmd_scripts(const char *game, const char *listing)
 
 static int cmd_show(const char *game, const char *wanted)
 {
-    char path[4096];
     char err[256] = {0};
-    cpz_archive *a = NULL;
-    const cpz_entry *e = NULL;
+    cmvs_game *g;
     pb3_image img;
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *texture;
-    int i, running = 1;
+    int running = 1;
 
-    for (i = 0; i < ARCHIVE_COUNT; i++) {
-        snprintf(path, sizeof path, "%s/data/pack/%s", game, ARCHIVES[i]);
-        a = cpz_open(path, err, sizeof err);
-        if (!a) continue;
-        e = cpz_find(a, wanted);
-        if (e) break;
-        cpz_close(a);
-        a = NULL;
-    }
-    if (!a || !e) { fprintf(stderr, "No entry named %s in any archive\n", wanted); return 1; }
-    if (!decode_entry(a, e, &img, err, sizeof err)) {
+    /* The same lookup the running engine uses, so what this shows is what a
+     * scene would get - one mechanism, not a second one that searches
+     * differently. */
+    g = cmvs_game_open(game, err, sizeof err);
+    if (!g) { fprintf(stderr, "%s: %s\n", game, err); return 1; }
+    if (!cmvs_game_image(g, wanted, &img, err, sizeof err)) {
         fprintf(stderr, "%s: %s\n", wanted, err);
-        cpz_close(a);
+        cmvs_game_close(g);
         return 1;
     }
-    cpz_close(a);
+    cmvs_game_close(g);
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -263,29 +256,20 @@ static int cmd_show(const char *game, const char *wanted)
 /* Writes BGRA out as a PNG, so a headless run can still be looked at. */
 static int cmd_png(const char *game, const char *wanted, const char *out_path)
 {
-    char path[4096], err[256] = {0};
-    cpz_archive *a = NULL;
-    const cpz_entry *e = NULL;
+    char err[256] = {0};
+    cmvs_game *g;
     pb3_image img;
     SDL_Surface *surface;
-    int i, rc;
+    int rc;
 
-    for (i = 0; i < ARCHIVE_COUNT; i++) {
-        snprintf(path, sizeof path, "%s/data/pack/%s", game, ARCHIVES[i]);
-        a = cpz_open(path, err, sizeof err);
-        if (!a) continue;
-        e = cpz_find(a, wanted);
-        if (e) break;
-        cpz_close(a);
-        a = NULL;
-    }
-    if (!a || !e) { fprintf(stderr, "No entry named %s in any archive\n", wanted); return 1; }
-    if (!decode_entry(a, e, &img, err, sizeof err)) {
+    g = cmvs_game_open(game, err, sizeof err);
+    if (!g) { fprintf(stderr, "%s: %s\n", game, err); return 1; }
+    if (!cmvs_game_image(g, wanted, &img, err, sizeof err)) {
         fprintf(stderr, "%s: %s\n", wanted, err);
-        cpz_close(a);
+        cmvs_game_close(g);
         return 1;
     }
-    cpz_close(a);
+    cmvs_game_close(g);
 
     surface = SDL_CreateRGBSurfaceWithFormatFrom(img.pixels, img.width, img.height, 32,
                                                  4 * img.width, SDL_PIXELFORMAT_ARGB8888);

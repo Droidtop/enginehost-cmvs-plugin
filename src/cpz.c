@@ -499,6 +499,28 @@ const cpz_entry *cpz_find(const cpz_archive *a, const char *name)
     return hit;
 }
 
+static const char *leaf_of(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+const cpz_entry *cpz_find_leaf(const cpz_archive *a, const char *name)
+{
+    char *want = lowercase_slashes(name);
+    int i;
+    const cpz_entry *hit = NULL;
+    if (!want) return NULL;
+    for (i = 0; i < a->count; i++) {
+        if (strcmp(leaf_of(a->entries[i].lookup), want) == 0) {
+            hit = &a->entries[i];
+            break;
+        }
+    }
+    free(want);
+    return hit;
+}
+
 void cmvs_decrypt_pb3(uint8_t *data, int size)
 {
     int key1 = data[size - 3], key2 = data[size - 2];

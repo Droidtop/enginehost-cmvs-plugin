@@ -213,21 +213,20 @@ int cmvs_game_image(cmvs_game *g, const char *name, pb3_image *out,
         wanted = with_suffix;
     }
     /*
-     * Every archive files its entries under a directory of its own name -
-     * "chip/title01_chip.pb3" inside chip.cpz - while the bytecode names only
-     * the leaf. So each archive is asked for the bare name and then for its own
-     * prefix, in the order start.ps3 registers them.
+     * Every archive files its entries under a directory, and the directory is
+     * NOT the archive's name: chip.cpz holds "chip/title01_chip.pb3" but bg.cpz
+     * holds "pb3/bg990a.pb3" and stand/up/balloon a folder per chapter. The
+     * bytecode names the leaf alone, so each archive is asked for the name as
+     * given and then for a leaf match, in the order start.ps3 registers them.
+     * While the lookup guessed the archive's own name as the prefix, every
+     * background in the game was missing - which is why the played scene had
+     * nothing behind its message window.
      */
     for (i = 0; i < ARCHIVE_COUNT; i++) {
         const cpz_entry *e;
-        char inside[1300];
-        size_t stem = strcspn(ARCHIVES[i], ".");
         if (!g->archive[i]) continue;
         e = cpz_find(g->archive[i], wanted);
-        if (!e) {
-            snprintf(inside, sizeof inside, "%.*s/%s", (int) stem, ARCHIVES[i], wanted);
-            e = cpz_find(g->archive[i], inside);
-        }
+        if (!e) e = cpz_find_leaf(g->archive[i], wanted);
         if (!e) continue;
         if (decode_here(g->archive[i], e, out, err, errlen)) return 1;
         return 0;
