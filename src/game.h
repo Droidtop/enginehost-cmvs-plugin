@@ -24,6 +24,11 @@ cmvs_game *cmvs_game_open(const char *folder, char *err, size_t errlen);
 void cmvs_game_close(cmvs_game *g);
 
 int cmvs_game_width(const cmvs_game *g);
+/* The first FONT= family in cmvs.cfg, still in cp932 (ChronoClock names
+ * "MS Gothic"). The game ships no font file; this is what it asks Windows for
+ * and what the desktop runner asks fontconfig for. Empty when the file has no
+ * FONT line at all. */
+const char *cmvs_game_font(const cmvs_game *g);
 int cmvs_game_height(const cmvs_game *g);
 
 /*

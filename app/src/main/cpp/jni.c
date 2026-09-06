@@ -42,7 +42,7 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeOpen(JNIEnv *env, jclass klass,
     cmvs_session *session;
 
     last_error[0] = 0;
-    session = cmvs_session_open(folder_text, script_text, last_error, sizeof last_error);
+    session = cmvs_session_open(folder_text, script_text, NULL, last_error, sizeof last_error);
     if (folder_release) (*env)->ReleaseStringUTFChars(env, folder, folder_release);
     if (script_release) (*env)->ReleaseStringUTFChars(env, script, script_release);
     if (session == NULL) {

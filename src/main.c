@@ -315,6 +315,7 @@ static int cmd_png(const char *game, const char *wanted, const char *out_path)
 typedef struct {
     const char *script;
     int trace;
+    const char *font;
     long budget;
     int frames;
     const char *shot;
@@ -462,7 +463,7 @@ static int run_window(cmvs_session *s, const run_options *o)
 static int cmd_run(const char *folder, const run_options *o)
 {
     char err[256] = {0};
-    cmvs_session *s = cmvs_session_open(folder, o->script, err, sizeof err);
+    cmvs_session *s = cmvs_session_open(folder, o->script, o->font, err, sizeof err);
     int rc;
 
     if (!s) { fprintf(stderr, "%s\n", err); return 1; }
@@ -504,6 +505,7 @@ int main(int argc, char **argv)
             else if (!strcmp(argv[i], "-n") && i + 1 < argc) o.budget = atol(argv[++i]);
             else if (!strcmp(argv[i], "-f") && i + 1 < argc) o.frames = atoi(argv[++i]);
             else if (!strcmp(argv[i], "--shot") && i + 1 < argc) o.shot = argv[++i];
+            else if (!strcmp(argv[i], "--font") && i + 1 < argc) o.font = argv[++i];
             else if (!strcmp(argv[i], "--window")) { o.window = 1; o.frames = 0; }
             else if (!strcmp(argv[i], "--point") && i + 2 < argc) {
                 o.point_x = atoi(argv[++i]);

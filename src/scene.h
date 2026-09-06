@@ -36,10 +36,12 @@
 #include <stdint.h>
 
 #include "game.h"
+#include "text.h"
 
 #define CMVS_OBJECTS 256      /* the table at +0x77c */
 #define CMVS_LAYERS  8        /* the table at +0xb90 */
 #define CMVS_PARTS   0x300    /* the bound every accessor checks */
+#define CMVS_TEXT_IDS 12      /* the table at +0xbb0, and 0x112's bound */
 
 /* Where layer L's graphic object lives in the same table. Every layer command
  * turns its layer argument into this and then speaks the object vocabulary. */
@@ -92,6 +94,26 @@ void cmvs_scene_show(cmvs_scene *s, int object, int part, int visible);
 /* Composes everything into one BGRA frame, top-down, stride 4 * width. The
  * buffer belongs to the scene. */
 const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height);
+
+/*
+ * The text a layer draws (the layer object's own +0x9dc). The scene owns it
+ * because the scene is what composes it: a layer's line sits inside the window
+ * that layer draws, so it lands at the layer object's own position.
+ */
+cmvs_text *cmvs_scene_text(cmvs_scene *s, int layer);
+
+/*
+ * The same text object under the id a script measures it by. Command 0x15d
+ * registers a layer's text object in the table at +0xbb0 (ChronoClock's message
+ * window is layer 0 under id 7) and command 0x112 then measures by that id, so
+ * the two commands must reach one object or the script lays its window out from
+ * numbers that belong to nothing.
+ */
+void cmvs_scene_text_register(cmvs_scene *s, int id, int layer);
+cmvs_text *cmvs_scene_text_by_id(cmvs_scene *s, int id);
+
+/* The face the glyphs are cut from; the session finds it, see font.h. */
+void cmvs_scene_font(cmvs_scene *s, cmvs_font *font);
 
 /* What is on screen, for the runner to report without a window. */
 int cmvs_scene_drawn(const cmvs_scene *s);

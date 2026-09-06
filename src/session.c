@@ -6,18 +6,60 @@
 
 #include "game.h"
 #include "interp.h"
+#include "font.h"
 #include "scene.h"
 
 struct cmvs_session {
     cmvs_game *game;
     cmvs_interp *interp;
     const uint8_t *pixels;
+    cmvs_font *font;
     long budget;
     int alive;
 };
 
+/*
+ * cmvs.cfg names its family in cp932; fontconfig is asked in UTF-8, and it is
+ * asked through a shell, so a family with a quote in it never reaches it.
+ */
+static void family_utf8(const char *cp932, char *out, size_t outlen)
+{
+    size_t at = 0, put = 0;
+    out[0] = 0;
+    while (cp932 && cp932[at] && put + 4 < outlen) {
+        unsigned code = cmvs_cp932_next(cp932, &at);
+        if (!code || code == 0xFFFD) continue;
+        if (code == 0x27 || code == 0x22 || code < 0x20) continue;
+        if (code < 0x80) out[put++] = (char) code;
+        else if (code < 0x800) {
+            out[put++] = (char) (0xC0 | (code >> 6));
+            out[put++] = (char) (0x80 | (code & 0x3F));
+        } else {
+            out[put++] = (char) (0xE0 | (code >> 12));
+            out[put++] = (char) (0x80 | ((code >> 6) & 0x3F));
+            out[put++] = (char) (0x80 | (code & 0x3F));
+        }
+    }
+    out[put] = 0;
+}
+
+static void open_font(cmvs_session *s, const char *override)
+{
+    char wanted[256], path[1024];
+    family_utf8(cmvs_game_font(s->game), wanted, sizeof wanted);
+    if (!cmvs_font_find(override, wanted, path, sizeof path)) {
+        /* Worth saying out loud: with no Japanese face on the machine the game
+         * runs and every line of it is blank. */
+        fprintf(stderr, "cmvs: no font for \"%s\": text will not draw\n", wanted);
+        return;
+    }
+    s->font = cmvs_font_open(path);
+    if (!s->font) fprintf(stderr, "cmvs: %s cannot be read as a font\n", path);
+    else cmvs_scene_font(cmvs_interp_scene(s->interp), s->font);
+}
+
 cmvs_session *cmvs_session_open(const char *folder, const char *script,
-                                char *err, size_t errlen)
+                                const char *font, char *err, size_t errlen)
 {
     cmvs_session *s = calloc(1, sizeof *s);
     if (!s) {
@@ -38,6 +80,7 @@ cmvs_session *cmvs_session_open(const char *folder, const char *script,
         cmvs_session_close(s);
         return NULL;
     }
+    open_font(s, font);
     s->alive = 1;
     return s;
 }
@@ -46,6 +89,7 @@ void cmvs_session_close(cmvs_session *s)
 {
     if (!s) return;
     cmvs_interp_free(s->interp);
+    cmvs_font_free(s->font);
     cmvs_game_close(s->game);
     free(s);
 }

@@ -16,9 +16,12 @@ struct cmvs_game {
     char folder[512];
     char pack[1024];            /* absolute, with a trailing slash */
     int width, height;
+    char font[128];             /* the first FONT= family, cp932 as written */
     cpz_archive *archive[ARCHIVE_COUNT];
     int script_archive;         /* index of script.cpz, or -1 */
 };
+
+const char *cmvs_game_font(const cmvs_game *g) { return g ? g->font : ""; }
 
 static void fail(char *err, size_t errlen, const char *msg)
 {
@@ -47,6 +50,8 @@ static void read_config(cmvs_game *g)
             snprintf(g->pack, sizeof g->pack, "%.500s/%.400s", g->folder, line + 17);
             for (p = g->pack; *p; p++) if (*p == 0x5C) *p = '/';
             if (p > g->pack && p[-1] != '/') { *p++ = '/'; *p = 0; }
+        } else if (!strncmp(line, "FONT=", 5)) {
+            if (!g->font[0]) snprintf(g->font, sizeof g->font, "%.120s", line + 5);
         } else if (!strncmp(line, "WINDOW_WIDTH=", 13)) {
             int v = atoi(line + 13);
             if (v > 0) g->width = v;

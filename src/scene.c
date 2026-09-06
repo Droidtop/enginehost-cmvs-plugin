@@ -44,6 +44,9 @@ struct cmvs_scene {
      * 0x00451d30 reaches a layer's sprites with the object family's own
      * accessor and there is nothing to tell apart below that call. */
     cmvs_object *object[CMVS_OBJECTS + CMVS_LAYERS];
+    cmvs_text text[CMVS_LAYERS];
+    int of_id[CMVS_TEXT_IDS];    /* the table at +0xbb0: which layer's text */
+    cmvs_font *font;
     int drawn;                   /* how many items the last compose blitted */
 };
 
@@ -73,6 +76,7 @@ static void object_free(cmvs_object *o)
 cmvs_scene *cmvs_scene_new(cmvs_game *game, int width, int height)
 {
     cmvs_scene *s;
+    int i;
     if (width <= 0 || height <= 0) return NULL;
     s = calloc(1, sizeof *s);
     if (!s) return NULL;
@@ -81,6 +85,8 @@ cmvs_scene *cmvs_scene_new(cmvs_game *game, int width, int height)
     s->height = height;
     s->frame = calloc((size_t) width * height, 4);
     if (!s->frame) { free(s); return NULL; }
+    for (i = 0; i < CMVS_LAYERS; i++) cmvs_text_init(&s->text[i]);
+    for (i = 0; i < CMVS_TEXT_IDS; i++) s->of_id[i] = -1;
     return s;
 }
 
@@ -89,6 +95,7 @@ void cmvs_scene_free(cmvs_scene *s)
     int i;
     if (!s) return;
     for (i = 0; i < CMVS_OBJECTS + CMVS_LAYERS; i++) object_free(s->object[i]);
+    for (i = 0; i < CMVS_LAYERS; i++) cmvs_text_free(&s->text[i]);
     free(s->frame);
     free(s);
 }
@@ -233,6 +240,26 @@ void cmvs_scene_size(cmvs_scene *s, int object, int part, int size)
     o->item.size = size;
 }
 
+cmvs_text *cmvs_scene_text(cmvs_scene *s, int layer)
+{
+    if (!s || layer < 0 || layer >= CMVS_LAYERS) return NULL;
+    return &s->text[layer];
+}
+
+void cmvs_scene_text_register(cmvs_scene *s, int id, int layer)
+{
+    if (!s || id < 0 || id >= CMVS_TEXT_IDS) return;
+    s->of_id[id] = (layer >= 0 && layer < CMVS_LAYERS) ? layer : -1;
+}
+
+cmvs_text *cmvs_scene_text_by_id(cmvs_scene *s, int id)
+{
+    if (!s || id < 0 || id >= CMVS_TEXT_IDS || s->of_id[id] < 0) return NULL;
+    return &s->text[s->of_id[id]];
+}
+
+void cmvs_scene_font(cmvs_scene *s, cmvs_font *font) { if (s) s->font = font; }
+
 /* ------------------------------------------------------------------ blit */
 
 static void blend(uint8_t *dst, const uint8_t *src, int alpha)
@@ -304,8 +331,17 @@ const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
     s->drawn = 0;
     /* The layers carry the played scene and the graphic objects the interface
      * the player reads over it, so the layers go down first. */
-    for (i = CMVS_OBJECTS + CMVS_LAYERS - 1; i >= CMVS_OBJECTS; i--)
-        if (s->object[i]) draw_object(s, s->object[i], NULL, 0, 0);
+    for (i = CMVS_OBJECTS + CMVS_LAYERS - 1; i >= CMVS_OBJECTS; i--) {
+        int layer = i - CMVS_OBJECTS;
+        const cmvs_object *o = s->object[i];
+        if (o) draw_object(s, o, NULL, 0, 0);
+        /* The line goes over the window it is written in, and the window is
+         * the layer's own object: the message box sits at y = 540 and the pen
+         * counts from there. */
+        cmvs_text_compose(&s->text[layer], s->font, s->frame, s->width, s->height,
+                          o ? o->item.x + o->item.ox : 0,
+                          o ? o->item.y + o->item.oy : 0);
+    }
     for (i = 0; i < CMVS_OBJECTS; i++)
         if (s->object[i]) draw_object(s, s->object[i], NULL, 0, 0);
     if (width) *width = s->width;

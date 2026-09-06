@@ -18,7 +18,7 @@ typedef struct cmvs_session cmvs_session;
 /* Opens the game folder and boots `script`, or "start.ps3" when it is NULL -
  * the boot script every CMVS game ships loose beside its archives. */
 cmvs_session *cmvs_session_open(const char *folder, const char *script,
-                                char *err, size_t errlen);
+                                const char *font, char *err, size_t errlen);
 void cmvs_session_close(cmvs_session *s);
 
 int cmvs_session_width(const cmvs_session *s);

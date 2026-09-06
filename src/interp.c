@@ -956,6 +956,96 @@ static int command_builtin(cmvs_interp *in, int command)
                           arg(in, 4, 2), arg(in, 4, 1), arg(in, 4, 0));
         in->command_known[command] = 1;
         return 0;
+    /* ------------------------------------------------------------ the text */
+    /*
+     * Every one of these reaches [machine + layer*4 + 0xb90] and then that
+     * layer object's own text object at +0x9dc, so the layer is the LAST
+     * argument exactly as it is for the sprite commands, and the setters below
+     * are the ones at 0x00450400..0x004505c0.
+     */
+    case 0x141:   /* 0x004668d0: the layer's text object is made again */
+    case 0x14A: { /* 0x00452620 -> 0x004506a0: the line is gone */
+        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 1, 0));
+        if (t) cmvs_text_clear(t);
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x143: { /* 0x004669d0 -> 0x00450450: the size, on its own */
+        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 2, 1));
+        if (t) cmvs_text_size(t, arg(in, 2, 0), -1, -1);
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x145: { /* 0x00466a60 -> 0x00450420: the box, and the pen with it */
+        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 5, 4));
+        if (t) cmvs_text_box(t, arg(in, 5, 3), arg(in, 5, 2),
+                                arg(in, 5, 1), arg(in, 5, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x146: { /* 0x00466ab0 -> 0x00450520: the two colours */
+        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
+        if (t) cmvs_text_colours(t, (uint32_t) arg(in, 3, 1),
+                                    (uint32_t) arg(in, 3, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x14F: { /* 0x00466da0 -> 0x00450550: put the pen here */
+        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
+        if (t) cmvs_text_pen(t, arg(in, 3, 1), arg(in, 3, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x150: { /* 0x00466df0 -> 0x00452750: move the box itself */
+        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 4, 3));
+        int mode = arg(in, 4, 2), x = arg(in, 4, 1), y = arg(in, 4, 0);
+        if (t) {
+            /* Mode 1 is relative to where the box already is; anything else
+             * puts it there. The size is untouched either way. */
+            if (mode == 1) cmvs_text_box(t, t->rx + x, t->ry + y, t->rw, t->rh);
+            else cmvs_text_box(t, x, y, t->rw, t->rh);
+        }
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x152: { /* 0x00466e90 -> 0x004523e0 -> 0x00451120: write the line */
+        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
+        const char *text = string_text(in, arg(in, 3, 0));
+        if (t && text) cmvs_text_draw(t, text);
+        in->command_known[command] = t && text;
+        return 0;
+    }
+    case 0x155: { /* 0x00466b00 -> 0x004505b0: the edge colour */
+        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 2, 1));
+        if (t) cmvs_text_edge(t, (uint32_t) arg(in, 2, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x15D: {
+        /* 0x00466670: the message window. Its last two arguments are the text
+         * object's id and the layer that draws it - ChronoClock's line is
+         * layer 0 registered under id 7 - and the six before them are the
+         * geometry the layer's own commands set anyway. */
+        cmvs_scene_text_register(in->scene, arg(in, 8, 6), arg(in, 8, 7));
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x112: {
+        /* 0x004641c0 -> 0x004509a0: how the string would lay out. The script
+         * centres its window on the answer, so a stale accumulator here put
+         * the message box and every glyph in it somewhere else entirely.
+         * The argument is the +0xbb0 ID, not a layer: 0x15d said which. */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 2, 1));
+        const char *text = string_text(in, arg(in, 2, 0));
+        int widest = 0, last = 0;
+        if (t && text) {
+            in->sys[0] = cmvs_text_measure(t, text, &widest, &last);
+            in->sys[1] = widest;
+            in->sys[4] = last;
+            in->command_known[command] = 1;
+        }
+        return 0;
+    }
     /* --------------------------------------------- registered procedures */
     case 0x088: {   /* 0x004634D0: proc[arg4] = this script at label arg3 */
         int32_t which = arg(in, 5, 4);
