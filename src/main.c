@@ -296,7 +296,10 @@ static int cmd_png(const char *game, const char *wanted, const char *out_path)
  * in for a hand - they put the pointer somewhere and press it on a numbered
  * frame - so a menu can be proven in a container with no display at all.
  * --click may be given more than once, because reading a scene takes more than
- * one tap: one to leave the title and one for each line after that.
+ * one tap: one to leave the title and one for each line after that. --hold
+ * says how many frames a click stays down; a finger on a real screen holds a
+ * tap for a tenth of a second, six or seven frames, and a scene that reads
+ * correctly with a one-frame press can still lose a line to a held one.
  */
 #define CLICKS 16
 typedef struct {
@@ -310,6 +313,7 @@ typedef struct {
     int point_x, point_y, has_point;
     int click_frame[CLICKS];
     int clicks;
+    int hold;
 } run_options;
 
 /*
@@ -355,12 +359,12 @@ static int run_headless(cmvs_session *s, const run_options *o)
 
     for (frame = 0; frame < o->frames && rc > 0; frame++) {
         if (o->has_point) cmvs_session_pointer(s, o->point_x, o->point_y);
-        /* Press on the named frame and let go on the next one: a menu reports
-         * a click on the release, having seen the press, so the two cannot be
-         * the same frame. */
+        /* Press on the named frame and let go `hold` frames later: a menu
+         * reports a click on the release, having seen the press, so the two
+         * cannot be the same frame. */
         for (i = 0; i < o->clicks; i++) {
             if (frame == o->click_frame[i]) cmvs_session_button(s, 0, 1);
-            if (frame == o->click_frame[i] + 1) cmvs_session_button(s, 0, 0);
+            if (frame == o->click_frame[i] + o->hold) cmvs_session_button(s, 0, 0);
         }
         rc = cmvs_session_frame(s, err, sizeof err);
         if (o->trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_session_script(s));
@@ -488,6 +492,7 @@ int main(int argc, char **argv)
         o.script = NULL;
         o.budget = 2000000;
         o.frames = 60;
+        o.hold = 1;
         for (i = 3; i < argc; i++) {
             if (!strcmp(argv[i], "-v")) o.trace = 1;
             else if (!strcmp(argv[i], "-vv")) o.trace = 2;
@@ -503,6 +508,9 @@ int main(int argc, char **argv)
             } else if (!strcmp(argv[i], "--click") && i + 1 < argc) {
                 if (o.clicks < CLICKS) o.click_frame[o.clicks++] = atoi(argv[++i]);
                 else i++;
+            } else if (!strcmp(argv[i], "--hold") && i + 1 < argc) {
+                o.hold = atoi(argv[++i]);
+                if (o.hold < 1) o.hold = 1;
             }
             else o.script = argv[i];
         }
