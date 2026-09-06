@@ -1083,6 +1083,37 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = t && text;
         return 0;
     }
+    /* ---------------------------------------------------- the input poll */
+    /*
+     * The device at +0xcb8 keeps a released/held/pressed triple for each of
+     * twenty-one virtual buttons, twelve bytes apart from +0x43c; 0x00448b20
+     * and 0x00448f00 read two of them and their callers (0x00468a00 and
+     * 0x00469020) answer the same way: sys[0] is the RELEASED edge and sys[4]
+     * the HELD level, each as one or zero.
+     *
+     * snky01.ps3 waits on these once its line is written - it polls them every
+     * frame instead of stopping in the 0x153 wait, which is the path a line
+     * whose window was sized by the string commands takes - so with neither of
+     * them here a tap never advanced the scene.
+     */
+    case 0x1A0:     /* 0x00468a00 -> 0x00448b20: the left button, +0x43c */
+        in->sys[0] = in->input.left_released ? 1 : 0;
+        in->sys[4] = in->input.left_held ? 1 : 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x34A:
+        /*
+         * 0x00469020 -> 0x00448f00: virtual button 20 (+0x52c), one of the
+         * bound keys 0x0044afea maps out of cmvs.cfg's key table. This engine
+         * takes a pointer and a pad and has nothing bound to it, so it answers
+         * "not pressed" - definitely, rather than leaving whatever the last
+         * measurement wrote in sys[0], which is the difference between a
+         * scene that advances and one that does not.
+         */
+        in->sys[0] = 0;
+        in->sys[4] = 0;
+        in->command_known[command] = 1;
+        return 0;
     case 0x153: {
         /*
          * 0x00466fc0, and it is THE WAIT: the command a line rests on until the
