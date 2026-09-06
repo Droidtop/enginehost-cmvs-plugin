@@ -300,6 +300,37 @@ static int cmvs_lead_byte(unsigned char c)
 }
 
 /*
+ * 0x00406cd0, the engine's own string comparison, and it answers "these are
+ * the same" rather than an ordering: 1 when both strings end together, 0 at
+ * the first difference. A double-byte character is matched byte for byte; a
+ * single-byte one is folded to upper case first (the exe adds 0xE0 to a byte
+ * in 'a'..'z', which is the same wrap), so a script's comparison against a
+ * letter does not depend on the case the text is written in.
+ */
+static int same_text(const char *a, const char *b)
+{
+    while (*a) {
+        unsigned char ca = (unsigned char) *a, cb;
+        if (cmvs_lead_byte(ca)) {
+            if (ca != (unsigned char) *b) return 0;
+            if (!a[1] || !b[1]) return 0;
+            ca = (unsigned char) a[1];
+            cb = (unsigned char) b[1];
+            a += 2;
+            b += 2;
+        } else {
+            cb = (unsigned char) *b;
+            a++;
+            b++;
+            if (ca >= 0x61 && ca <= 0x7A) ca -= 0x20;
+            if (cb >= 0x61 && cb <= 0x7A) cb -= 0x20;
+        }
+        if (ca != cb) return 0;
+    }
+    return *b == 0;
+}
+
+/*
  * The handle an operand token stands for, from the epilogue at 0x00459992: the
  * token decides the tag and the operand is the offset. 0x122 is the one that
  * holds a handle rather than being one, so it is read out of the stack.
@@ -1212,10 +1243,17 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = dst != NULL && src != NULL;
         return 0;
     }
-    case 0x0F1: {   /* 0x00465160: the two are the same text, 1 or 0 */
+    case 0x0F1: {
+        /*
+         * 0x00465160: ZERO when the two are the same text. The handler calls
+         * 0x00406cd0, which answers 1 for "same", and then runs it through
+         * neg/sbb/inc - which turns 1 into 0 and 0 into 1. So the value a
+         * script tests is "these differ", and reading it the other way round
+         * inverts every branch built on it.
+         */
         const char *a = string_text(in, arg(in, 2, 1));
         const char *b = string_text(in, arg(in, 2, 0));
-        in->sys[0] = (a && b && strcmp(a, b) == 0) ? 1 : 0;
+        in->sys[0] = (a && b && same_text(a, b)) ? 0 : 1;
         in->command_known[command] = a != NULL && b != NULL;
         return 0;
     }
