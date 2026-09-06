@@ -1558,12 +1558,20 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
             if (in->depth > 0) in->depth--;
             break;
         case 0x0414: {
+            /*
+             * 0x0045ab2c: the return that pairs with 0x08a. It pops the three
+             * words that call left - slot, pc, repeat - and that is ALL it
+             * does: it never touches the call depth at +0x13d28, because 0x08a
+             * (0x00463560) never raised it. Decrementing here cost a frame
+             * level per registered-procedure call, so after the scene's first
+             * one every local read came off the wrong frame base and the
+             * script's own epilogue returned to a pc it had never pushed.
+             */
             int slot = pop(in);
             int back = pop(in);
             in->repeat = pop(in);
             if (slot >= 0 && slot < MAX_SLOTS && in->slot[slot].loaded) in->current = slot;
             in->pc = back;
-            if (in->depth > 0) in->depth--;
             break;
         }
         case 0x0416:
