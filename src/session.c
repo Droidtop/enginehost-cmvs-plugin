@@ -76,7 +76,9 @@ cmvs_session *cmvs_session_open(const char *folder, const char *script,
         free(s);
         return NULL;
     }
-    if (!cmvs_interp_boot(s->interp, script && *script ? script : "start.ps3", err, errlen)) {
+    if (!cmvs_interp_boot(s->interp,
+                          script && *script ? script : cmvs_game_boot_script(s->game),
+                          err, errlen)) {
         cmvs_session_close(s);
         return NULL;
     }

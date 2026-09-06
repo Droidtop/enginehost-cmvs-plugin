@@ -39,6 +39,19 @@ int cmvs_game_height(const cmvs_game *g);
 int cmvs_game_script(cmvs_game *g, const char *name, cmvs_script *out,
                      char *err, size_t errlen);
 
+/*
+ * The name the engine boots from: "start.ps3" for a PS3-generation game and
+ * "start.ps2" for a PS2-generation one, whichever the game actually ships.
+ */
+const char *cmvs_game_boot_script(cmvs_game *g);
+
+/* The archives that were found in the pack folder, for the desktop runner's
+ * own listings; the engine addresses data by name and never by archive. */
+int cmvs_game_archives(const cmvs_game *g);
+cpz_archive *cmvs_game_archive(const cmvs_game *g, int i);
+const char *cmvs_game_archive_name(const cmvs_game *g, int i);
+const char *cmvs_game_pack(const cmvs_game *g);
+
 /* Decodes an image by entry name, searching every archive that holds images. */
 int cmvs_game_image(cmvs_game *g, const char *name, pb3_image *out,
                     char *err, size_t errlen);

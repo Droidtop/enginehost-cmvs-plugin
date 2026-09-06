@@ -24,12 +24,6 @@
 #include "script.h"
 #include "vm.h"
 
-static const char *ARCHIVES[] = {
-    "ps.cpz", "script.cpz", "bg.cpz", "chip.cpz", "balloon.cpz",
-    "stand.cpz", "up.cpz", "event.cpz", "se.cpz", "video.cpz",
-};
-static const int ARCHIVE_COUNT = (int) (sizeof ARCHIVES / sizeof ARCHIVES[0]);
-
 /* Where a type 6 overlay's base image is looked up: the same archive, and the
  * same directory inside it, because that is how the game names them. */
 typedef struct {
@@ -78,36 +72,37 @@ static int decode_entry(cpz_archive *a, const cpz_entry *e, pb3_image *img,
 
 static int cmd_list(const char *game)
 {
-    char path[4096];
+    char err[256] = {0};
+    cmvs_game *g = cmvs_game_open(game, err, sizeof err);
     int i, total = 0;
-    for (i = 0; i < ARCHIVE_COUNT; i++) {
-        char err[256] = {0};
-        cpz_archive *a;
-        snprintf(path, sizeof path, "%s/data/pack/%s", game, ARCHIVES[i]);
-        a = cpz_open(path, err, sizeof err);
-        if (!a) { printf("%-12s -- %s\n", ARCHIVES[i], err); continue; }
-        printf("%-12s scheme=%-14s entries=%d\n", ARCHIVES[i], cpz_scheme_name(a), cpz_count(a));
+
+    if (!g) { fprintf(stderr, "%s: %s\n", game, err); return 1; }
+    for (i = 0; i < cmvs_game_archives(g); i++) {
+        cpz_archive *a = cmvs_game_archive(g, i);
+        const char *name = cmvs_game_archive_name(g, i);
+        if (!a) { printf("%-12s -- unreadable\n", name); continue; }
+        printf("%-12s scheme=%-14s entries=%d\n", name, cpz_scheme_name(a), cpz_count(a));
         total += cpz_count(a);
-        cpz_close(a);
     }
     printf("\n%d entries readable in total\n", total);
+    cmvs_game_close(g);
     return 0;
 }
 
 static int cmd_check(const char *game, int per_archive)
 {
-    char path[4096];
+    char open_err[256] = {0};
+    cmvs_game *g = cmvs_game_open(game, open_err, sizeof open_err);
     int i, decoded = 0, failed = 0;
 
-    for (i = 0; i < ARCHIVE_COUNT; i++) {
+    if (!g) { fprintf(stderr, "%s: %s\n", game, open_err); return 1; }
+    for (i = 0; i < cmvs_game_archives(g); i++) {
         char err[256] = {0};
-        cpz_archive *a;
+        cpz_archive *a = cmvs_game_archive(g, i);
         int n, images = 0, ok = 0, bad = 0, step, k;
         Uint32 t0;
         int by_type[16];
 
-        snprintf(path, sizeof path, "%s/data/pack/%s", game, ARCHIVES[i]);
-        a = cpz_open(path, err, sizeof err);
         if (!a) continue;
         n = cpz_count(a);
         for (k = 0; k < n; k++) {
@@ -115,7 +110,7 @@ static int cmd_check(const char *game, int per_archive)
             size_t len = strlen(name);
             if (len > 4 && !strcmp(name + len - 4, ".pb3")) images++;
         }
-        if (!images) { cpz_close(a); continue; }
+        if (!images) continue;
 
         memset(by_type, 0, sizeof by_type);
         step = images / per_archive;
@@ -140,12 +135,13 @@ static int cmd_check(const char *game, int per_archive)
             }
         }
         printf("%-12s pb3=%-5d sampled=%-4d decoded=%-4d failed=%-3d  (%u ms)\n",
-               ARCHIVES[i], images, ok + bad, ok, bad, (unsigned) (SDL_GetTicks() - t0));
+               cmvs_game_archive_name(g, i), images, ok + bad, ok, bad,
+               (unsigned) (SDL_GetTicks() - t0));
         decoded += ok;
         failed += bad;
-        cpz_close(a);
     }
     printf("\n%d images decoded, %d failed\n", decoded, failed);
+    cmvs_game_close(g);
     return failed ? 1 : 0;
 }
 
@@ -153,12 +149,16 @@ static int cmd_check(const char *game, int per_archive)
 static int cmd_scripts(const char *game, const char *listing)
 {
     char path[4096], err[256] = {0};
-    cpz_archive *a;
+    cmvs_game *probe = cmvs_game_open(game, err, sizeof err);
+    cpz_archive *a = NULL;
     int k, n, clean = 0, total = 0;
     long statements = 0, commands = 0, expressions = 0, unknown = 0, strings = 0;
 
-    snprintf(path, sizeof path, "%s/data/pack/script.cpz", game);
-    a = cpz_open(path, err, sizeof err);
+    if (probe) {
+        snprintf(path, sizeof path, "%sscript.cpz", cmvs_game_pack(probe));
+        cmvs_game_close(probe);
+        a = cpz_open(path, err, sizeof err);
+    }
     if (!a) { fprintf(stderr, "script.cpz: %s\n", err); return 1; }
     n = cpz_count(a);
     for (k = 0; k < n; k++) {
@@ -485,7 +485,7 @@ int main(int argc, char **argv)
         run_options o;
         int i;
         memset(&o, 0, sizeof o);
-        o.script = "start.ps3";
+        o.script = NULL;
         o.budget = 2000000;
         o.frames = 60;
         for (i = 3; i < argc; i++) {

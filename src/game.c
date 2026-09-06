@@ -1,25 +1,44 @@
 #include "game.h"
 
 #include <ctype.h>
+#include <dirent.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* The order start.ps3 registers them in; the image lookup follows it. */
-static const char *ARCHIVES[] = {
-    "script.cpz", "se.cpz", "voice2.cpz", "voice.cpz", "chip.cpz", "bg.cpz",
-    "event.cpz", "stand.cpz", "up.cpz", "balloon.cpz", "ps.cpz", "video.cpz",
-};
-#define ARCHIVE_COUNT ((int) (sizeof ARCHIVES / sizeof ARCHIVES[0]))
+/*
+ * How many archives a game may have. Which archives it HAS is read off the
+ * pack folder: the engine binary names none of them, the names come from the
+ * mounts the game's own boot script makes, and a game with no voices or no
+ * video simply ships fewer files. A fixed list was a fact about one game.
+ */
+#define ARCHIVE_MAX 32
 
 struct cmvs_game {
     char folder[512];
     char pack[1024];            /* absolute, with a trailing slash */
     int width, height;
     char font[128];             /* the first FONT= family, cp932 as written */
-    cpz_archive *archive[ARCHIVE_COUNT];
-    int script_archive;         /* index of script.cpz, or -1 */
+    cpz_archive *archive[ARCHIVE_MAX];
+    char archive_name[ARCHIVE_MAX][64];
+    int archives;
+    int script_archive;         /* index of the archive that holds scripts */
 };
+
+int cmvs_game_archives(const cmvs_game *g) { return g ? g->archives : 0; }
+
+cpz_archive *cmvs_game_archive(const cmvs_game *g, int i)
+{
+    return (g && i >= 0 && i < g->archives) ? g->archive[i] : NULL;
+}
+
+const char *cmvs_game_archive_name(const cmvs_game *g, int i)
+{
+    return (g && i >= 0 && i < g->archives) ? g->archive_name[i] : "";
+}
+
+const char *cmvs_game_pack(const cmvs_game *g) { return g ? g->pack : ""; }
 
 const char *cmvs_game_font(const cmvs_game *g) { return g ? g->font : ""; }
 
@@ -63,6 +82,36 @@ static void read_config(cmvs_game *g)
     fclose(f);
 }
 
+static int name_order(const void *a, const void *b)
+{
+    return strcmp((const char *) a, (const char *) b);
+}
+
+/*
+ * Every *.cpz in the pack folder, in name order. Name order is not the order
+ * the boot script mounts them in, and it does not have to be: an entry is
+ * addressed by the leaf of its stored path and those are unique across a
+ * game's archives. What matters is that the set comes from the game.
+ */
+static void collect_archives(cmvs_game *g)
+{
+    DIR *d = opendir(g->pack);
+    struct dirent *e;
+
+    if (!d) return;
+    while ((e = readdir(d)) && g->archives < ARCHIVE_MAX) {
+        size_t len = strlen(e->d_name);
+        if (len < 5 || len >= sizeof g->archive_name[0]) continue;
+        if (strcasecmp(e->d_name + len - 4, ".cpz")) continue;
+        snprintf(g->archive_name[g->archives], sizeof g->archive_name[0],
+                 "%s", e->d_name);
+        g->archives++;
+    }
+    closedir(d);
+    qsort(g->archive_name, (size_t) g->archives, sizeof g->archive_name[0],
+          name_order);
+}
+
 cmvs_game *cmvs_game_open(const char *folder, char *err, size_t errlen)
 {
     cmvs_game *g = calloc(1, sizeof *g);
@@ -73,13 +122,19 @@ cmvs_game *cmvs_game_open(const char *folder, char *err, size_t errlen)
     g->script_archive = -1;
     read_config(g);
 
-    for (i = 0; i < ARCHIVE_COUNT; i++) {
+    collect_archives(g);
+    for (i = 0; i < g->archives; i++) {
         char path[2600], why[256];
-        snprintf(path, sizeof path, "%s%s", g->pack, ARCHIVES[i]);
+        snprintf(path, sizeof path, "%s%s", g->pack, g->archive_name[i]);
         g->archive[i] = cpz_open(path, why, sizeof why);
         if (!g->archive[i]) continue;
         opened++;
-        if (!strcmp(ARCHIVES[i], "script.cpz")) g->script_archive = i;
+        /* The scripts are wherever a PS2A container is filed, and every CMVS
+         * game so far calls that archive script.cpz; the test is the content
+         * of the archive rather than its name only where the name does not
+         * settle it, because opening one entry per archive is not free. */
+        if (g->script_archive < 0 && !strcmp(g->archive_name[i], "script.cpz"))
+            g->script_archive = i;
     }
     if (!opened) {
         fail(err, errlen, "no CPZ archive could be opened under the pack folder");
@@ -93,7 +148,7 @@ void cmvs_game_close(cmvs_game *g)
 {
     int i;
     if (!g) return;
-    for (i = 0; i < ARCHIVE_COUNT; i++) if (g->archive[i]) cpz_close(g->archive[i]);
+    for (i = 0; i < g->archives; i++) if (g->archive[i]) cpz_close(g->archive[i]);
     free(g);
 }
 
@@ -154,6 +209,27 @@ int cmvs_game_script(cmvs_game *g, const char *name, cmvs_script *out,
     snprintf(path, sizeof path, "no script named %.200s", name);
     fail(err, errlen, path);
     return 0;
+}
+
+/*
+ * The boot script. cmvs32.exe carries "start.ps3" and "main.ps3" as literals -
+ * the name is the engine's, not the game's - and a PS2-generation build names
+ * the same two files .ps2. So ask the game which generation it ships rather
+ * than assuming one.
+ */
+const char *cmvs_game_boot_script(cmvs_game *g)
+{
+    static const char *const NAMES[] = { "start.ps3", "start.ps2" };
+    int i;
+    for (i = 0; i < 2; i++) {
+        cmvs_script probe;
+        char why[256];
+        if (cmvs_game_script(g, NAMES[i], &probe, why, sizeof why)) {
+            cmvs_script_close(&probe);
+            return NAMES[i];
+        }
+    }
+    return NAMES[0];
 }
 
 /* Where a type 6 overlay's base image is looked up: the same archive and the
@@ -217,12 +293,12 @@ int cmvs_game_image(cmvs_game *g, const char *name, pb3_image *out,
      * NOT the archive's name: chip.cpz holds "chip/title01_chip.pb3" but bg.cpz
      * holds "pb3/bg990a.pb3" and stand/up/balloon a folder per chapter. The
      * bytecode names the leaf alone, so each archive is asked for the name as
-     * given and then for a leaf match, in the order start.ps3 registers them.
+     * given and then for a leaf match, archive by archive.
      * While the lookup guessed the archive's own name as the prefix, every
      * background in the game was missing - which is why the played scene had
      * nothing behind its message window.
      */
-    for (i = 0; i < ARCHIVE_COUNT; i++) {
+    for (i = 0; i < g->archives; i++) {
         const cpz_entry *e;
         if (!g->archive[i]) continue;
         e = cpz_find(g->archive[i], wanted);
