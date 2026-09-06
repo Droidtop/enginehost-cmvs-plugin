@@ -252,6 +252,13 @@ void cmvs_scene_text_register(cmvs_scene *s, int id, int layer)
     s->of_id[id] = (layer >= 0 && layer < CMVS_LAYERS) ? layer : -1;
 }
 
+void cmvs_scene_text_tick(cmvs_scene *s, int ms)
+{
+    int i;
+    if (!s) return;
+    for (i = 0; i < CMVS_LAYERS; i++) cmvs_text_tick(&s->text[i], ms);
+}
+
 cmvs_text *cmvs_scene_text_by_id(cmvs_scene *s, int id)
 {
     if (!s || id < 0 || id >= CMVS_TEXT_IDS || s->of_id[id] < 0) return NULL;

@@ -1033,6 +1033,46 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = t && text;
         return 0;
     }
+    case 0x153: {
+        /*
+         * 0x00466fc0, and it is THE WAIT: the command a line rests on until the
+         * reader has had it. It is the one command here that answers two ways.
+         * While the wait is on it returns 0xA000 - stop the script, do not step
+         * the pc, do not pop - so the very next frame re-enters it with its
+         * three arguments still under the stack top, which is the whole of the
+         * per-frame poll loop. When the wait is over it returns 0x400C and the
+         * script goes on to clear the line and write the next one.
+         *
+         * Its last argument is the layer, read the way every text command reads
+         * one ([esi + a*4 + 0xb90] at 0x0046704c); the one before it is the
+         * message id 0x136 logged the line under, and the first is the voice
+         * the line was spoken with.
+         *
+         * What is modelled is the path ChronoClock's scene takes: a press
+         * brings a still-typing line forward whole (0x00452cd0 consumes the
+         * edge and calls the line finished) and a press on a finished line ends
+         * the wait. The rest of 0x00452c50 is not here and is not pretended to
+         * be: auto-play's own timer out of the settings block at +0x5a0, skip
+         * mode at +0x5b8, the already-read test at 0x00473af0, and the message
+         * window's own buttons through the hit test at 0x00452a80.
+         */
+        cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
+        int click = in->input.left_pressed;
+        if (click) {
+            /* 0x00448B50, which is what the original calls the moment it has
+             * acted on the press. Leaving the edge latched would spend one
+             * click on every wait between here and the next frame. */
+            in->input.left_pressed = 0;
+            in->input.left_released = 0;
+        }
+        in->command_known[command] = 1;
+        if (t && cmvs_text_revealing(t)) {
+            if (click) cmvs_text_reveal_all(t);
+            return CMVS_CMD_REPEAT | CMVS_CMD_STOP;
+        }
+        if (!click) return CMVS_CMD_REPEAT | CMVS_CMD_STOP;
+        return CMVS_CMD_ADVANCE | 0x0C;
+    }
     case 0x155: { /* 0x00466b00 -> 0x004505b0: the edge colour */
         cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 2, 1));
         if (t) cmvs_text_edge(t, (uint32_t) arg(in, 2, 0));
@@ -1223,6 +1263,10 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
     /* 0x0045A8E0 opens with exactly this: ten timers, each advanced by the
      * frame's elapsed time before a single statement runs. */
     for (t = 0; t < 10; t++) in->timer[t] += in->frame_ms;
+    /* And the reveal runs off the same clock: 0x00452c50 adds the frame's own
+     * elapsed milliseconds (0x00406a70) before it decides how much of the line
+     * is due. */
+    cmvs_scene_text_tick(in->scene, in->frame_ms);
     in->running = 1;
     while (in->running && budget-- > 0) {
         int op = word_at(in, in->pc);

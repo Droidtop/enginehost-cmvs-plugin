@@ -311,7 +311,10 @@ static int cmd_png(const char *game, const char *wanted, const char *out_path)
  * run is headless, --shot writes the last frame, and --point and --click stand
  * in for a hand - they put the pointer somewhere and press it on a numbered
  * frame - so a menu can be proven in a container with no display at all.
+ * --click may be given more than once, because reading a scene takes more than
+ * one tap: one to leave the title and one for each line after that.
  */
+#define CLICKS 16
 typedef struct {
     const char *script;
     int trace;
@@ -321,7 +324,8 @@ typedef struct {
     const char *shot;
     int window;
     int point_x, point_y, has_point;
-    int click_frame;
+    int click_frame[CLICKS];
+    int clicks;
 } run_options;
 
 /*
@@ -363,15 +367,17 @@ static int report(cmvs_session *s, const run_options *o, int rc, const char *err
 static int run_headless(cmvs_session *s, const run_options *o)
 {
     char err[256] = {0};
-    int rc = 1, frame;
+    int rc = 1, frame, i;
 
     for (frame = 0; frame < o->frames && rc > 0; frame++) {
         if (o->has_point) cmvs_session_pointer(s, o->point_x, o->point_y);
         /* Press on the named frame and let go on the next one: a menu reports
          * a click on the release, having seen the press, so the two cannot be
          * the same frame. */
-        if (o->click_frame >= 0 && frame == o->click_frame) cmvs_session_button(s, 0, 1);
-        if (o->click_frame >= 0 && frame == o->click_frame + 1) cmvs_session_button(s, 0, 0);
+        for (i = 0; i < o->clicks; i++) {
+            if (frame == o->click_frame[i]) cmvs_session_button(s, 0, 1);
+            if (frame == o->click_frame[i] + 1) cmvs_session_button(s, 0, 0);
+        }
         rc = cmvs_session_frame(s, err, sizeof err);
         if (o->trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_session_script(s));
     }
@@ -481,7 +487,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
             "usage: %s <game folder> [--check [n] | --show <entry> | --bmp <entry> <out.bmp>]\n"
             "       %s <game folder> --run [script] [-v] [-f frames] [--shot out.png]\n"
-            "                              [--window] [--point x y] [--click frame]\n",
+            "                              [--window] [--point x y] [--click frame]...\n",
             argv[0], argv[0]);
         return 2;
     }
@@ -498,7 +504,6 @@ int main(int argc, char **argv)
         o.script = "start.ps3";
         o.budget = 2000000;
         o.frames = 60;
-        o.click_frame = -1;
         for (i = 3; i < argc; i++) {
             if (!strcmp(argv[i], "-v")) o.trace = 1;
             else if (!strcmp(argv[i], "-vv")) o.trace = 2;
@@ -511,7 +516,10 @@ int main(int argc, char **argv)
                 o.point_x = atoi(argv[++i]);
                 o.point_y = atoi(argv[++i]);
                 o.has_point = 1;
-            } else if (!strcmp(argv[i], "--click") && i + 1 < argc) o.click_frame = atoi(argv[++i]);
+            } else if (!strcmp(argv[i], "--click") && i + 1 < argc) {
+                if (o.clicks < CLICKS) o.click_frame[o.clicks++] = atoi(argv[++i]);
+                else i++;
+            }
             else o.script = argv[i];
         }
         return cmd_run(argv[1], &o);

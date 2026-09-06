@@ -12,9 +12,16 @@
  *   +0x6c                     kinsoku on                 (cmd 0x148's neighbour)
  *   +0x70 +0x74               two colours                (0x00450520, cmd 0x146)
  *   +0x7c                     the edge colour            (0x004505b0, cmd 0x155)
+ *   +0x84 +0x88               the reveal's mode and ms   (0x00450580, cmd 0x10d)
+ *   +0x8c                     the text speed             (0x00428920, cmd 0x10e)
  *   +0x90                     shown                      (0x004505e0)
  *   +0x98 +0x9c               the pen                    (0x00450550, cmd 0x14f)
  *   +0xa0                     the glyphs drawn so far    (0x004501b0 links them)
+ *
+ * The defaults below are not chosen here either: 0x00451ee0 is where a layer's
+ * text object is set back to them, and it writes size 0x1b, both colours
+ * 0xffffff, the pen at 0,0, kinsoku on, reveal mode 0 with a duration of 0 and
+ * a speed of 0x64.
  *
  * A colour here is a Windows COLORREF, because the original hands it to
  * SetBkColor: the low byte is red.
@@ -35,6 +42,13 @@ typedef struct {
     int size;               /* the em square it was laid out on */
     uint32_t colour;
     uint32_t edge;
+    /*
+     * When this character is due, in milliseconds after the line was cleared.
+     * 0x00450cd0 gives every glyph one as it is laid out, by carrying an
+     * accumulator from character to character and adding the per-character
+     * step to it; that is the whole of the typewriter.
+     */
+    int start;
 } cmvs_glyph;
 
 typedef struct {
@@ -44,6 +58,11 @@ typedef struct {
     uint32_t colour, colour2, edge;
     int visible;
     int pen_x, pen_y;
+
+    int speed;              /* +0x8c: the per-character step's source */
+    int mode, fade;         /* +0x84, +0x88: how a character arrives */
+    int clock;              /* ms since the line was cleared */
+    int next_start;         /* 0x00450cd0's accumulator, carried between calls */
 
     cmvs_glyph *glyph;
     int glyphs, capacity;
@@ -82,6 +101,16 @@ void cmvs_text_draw(cmvs_text *t, const char *cp932);
  */
 int cmvs_text_measure(const cmvs_text *t, const char *cp932,
                       int *widest, int *last);
+
+/*
+ * The reveal. The frame loop moves the clock on by the frame's own
+ * milliseconds and a character is drawn once its start time has passed;
+ * 0x00452c50 lets a click bring the whole line forward at once rather than
+ * making the reader wait for it, which is what cmvs_text_reveal_all is.
+ */
+void cmvs_text_tick(cmvs_text *t, int ms);
+int cmvs_text_revealing(const cmvs_text *t);
+void cmvs_text_reveal_all(cmvs_text *t);
 
 /* Rasterises the line into a BGRA frame at (ox, oy) - the layer's own position,
  * because a layer's text sits inside the window the layer draws. */

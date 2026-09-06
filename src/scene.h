@@ -110,6 +110,10 @@ cmvs_text *cmvs_scene_text(cmvs_scene *s, int layer);
  * numbers that belong to nothing.
  */
 void cmvs_scene_text_register(cmvs_scene *s, int id, int layer);
+
+/* One frame of time for every layer's reveal, so the typewriter runs off
+ * the same clock the ten engine timers do. */
+void cmvs_scene_text_tick(cmvs_scene *s, int ms);
 cmvs_text *cmvs_scene_text_by_id(cmvs_scene *s, int id);
 
 /* The face the glyphs are cut from; the session finds it, see font.h. */

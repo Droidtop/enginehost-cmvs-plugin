@@ -11,11 +11,17 @@ static int lead_byte(unsigned char c)
 
 void cmvs_text_init(cmvs_text *t)
 {
+    /* 0x00451ee0, which is where the engine puts a layer's text object back
+     * to its defaults, and every number here is one it writes. */
     memset(t, 0, sizeof *t);
-    t->size = 24;
+    t->size = 0x1B;
     t->colour = 0xFFFFFF;
     t->colour2 = 0xFFFFFF;
     t->edge = 0;
+    t->kinsoku = 1;
+    t->speed = 0x64;
+    t->mode = 0;
+    t->fade = 0;
     t->visible = 1;
 }
 
@@ -31,6 +37,36 @@ void cmvs_text_clear(cmvs_text *t)
     t->glyphs = 0;
     t->pen_x = t->rx;
     t->pen_y = t->ry;
+    /* The line is gone and so is its reveal: the next one starts from zero. */
+    t->clock = 0;
+    t->next_start = 0;
+}
+
+/*
+ * The per-character step, straight out of 0x004511f6: the speed at +0x8c
+ * doubled and divided by ten, which for the default 0x64 is 20 ms. A wait
+ * descriptor scales it by its own first field instead of by two; no command
+ * ChronoClock calls passes one, so the doubling is what runs here.
+ */
+static int step_ms(const cmvs_text *t)
+{
+    return t->speed * 2 / 10;
+}
+
+void cmvs_text_tick(cmvs_text *t, int ms)
+{
+    if (t && ms > 0) t->clock += ms;
+}
+
+int cmvs_text_revealing(const cmvs_text *t)
+{
+    return t && t->glyphs > 0 && t->glyph[t->glyphs - 1].start > t->clock;
+}
+
+void cmvs_text_reveal_all(cmvs_text *t)
+{
+    if (t && t->glyphs > 0 && t->glyph[t->glyphs - 1].start > t->clock)
+        t->clock = t->glyph[t->glyphs - 1].start;
 }
 
 void cmvs_text_box(cmvs_text *t, int x, int y, int w, int h)
@@ -77,6 +113,8 @@ static int append(cmvs_text *t, unsigned code, int x, int y)
     g->size = t->size;
     g->colour = t->colour;
     g->edge = t->edge;
+    g->start = t->next_start;
+    t->next_start += step_ms(t);
     return 1;
 }
 
@@ -215,6 +253,7 @@ void cmvs_text_compose(const cmvs_text *t, cmvs_font *font, uint8_t *frame,
     for (i = 0; i < t->glyphs; i++) {
         const cmvs_glyph *g = &t->glyph[i];
         int gw = 0, gh = 0, left = 0, top = 0, row, col;
+        if (g->start > t->clock) break;   /* not typed yet */
         const uint8_t *bits = cmvs_font_glyph(font, g->code, g->size,
                                               &gw, &gh, &left, &top);
         if (!bits) continue;
