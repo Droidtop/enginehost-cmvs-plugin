@@ -51,6 +51,19 @@ struct cmvs_interp {
     int32_t timer[10];
     int frame_ms;
 
+    /*
+     * The 64 registered procedures at +0x33c8, 0x1c bytes apiece. Command
+     * 0x088 puts the current script and a label into one of them and command
+     * 0x08a calls it: this is how a script hands the engine a piece of itself
+     * to run later, and how menu.ps3 gets from START to the game.
+     */
+    struct {
+        int used;
+        int slot;
+        int pc;
+        int32_t a, b, c;
+    } proc[64];
+
     int32_t acc;                 /* +0x13d30 */
     int flag;                    /* +0x13d2c bit 0 */
     int32_t sys[16];             /* +0x13d34 onwards, what token 0x10F reads */
@@ -841,6 +854,60 @@ static int command_builtin(cmvs_interp *in, int command)
         cmvs_scene_size(in->scene, arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0));
         in->command_known[command] = 1;
         return 0;
+    /* --------------------------------------------- registered procedures */
+    case 0x088: {   /* 0x004634D0: proc[arg4] = this script at label arg3 */
+        int32_t which = arg(in, 5, 4);
+        if (which >= 0 && which < 64) {
+            in->proc[which].used = 1;
+            in->proc[which].slot = in->current;
+            in->proc[which].pc = arg(in, 5, 3);
+            in->proc[which].a = arg(in, 5, 2);
+            in->proc[which].b = arg(in, 5, 1);
+            in->proc[which].c = arg(in, 5, 0);
+            in->command_known[command] = 1;
+        }
+        return 0;
+    }
+    case 0x08A: {
+        /*
+         * 0x00463560: a CALL, and the one command that moves the pc itself.
+         * It steps past its own two bytes, pops the index it was given, and
+         * puts the caller slot, the return pc and the current slot in its
+         * place - which is exactly the three words statement 0x0414 pops on
+         * the way back, so a registered procedure returns like any other.
+         * Its ABI byte count is zero and it returns no advance, because by
+         * then the pc belongs to the procedure.
+         */
+        int32_t which = arg(in, 1, 0) & 0x3F;
+        if (!in->proc[which].used) {
+            /* Nothing registered: step over the call rather than jumping to
+             * an address the game never wrote. Without this the pc would sit
+             * still and the script would spin for ever. */
+            in->pc += 2;
+            in->sp -= 4;
+            if (in->sp < 0) in->sp = 0;
+            return 0;
+        }
+        in->pc += 2;
+        in->sp -= 4;
+        if (in->sp < 0) in->sp = 0;
+        push(in, in->caller_slot);
+        push(in, in->pc);
+        push(in, in->current);
+        in->caller_slot = 0;
+        in->pc = in->proc[which].pc;
+        if (in->proc[which].slot >= 0 && in->proc[which].slot < MAX_SLOTS
+            && in->slot[in->proc[which].slot].loaded)
+            in->current = in->proc[which].slot;
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x08B: {   /* 0x00463610: forget the procedure again */
+        int32_t which = arg(in, 1, 0);
+        if (which >= 0 && which < 64) in->proc[which].used = 0;
+        in->command_known[command] = 1;
+        return 0;
+    }
     /* -------------------------------------------------------------- menus */
     case 0x210:   /* 0x004690C0: bind menu arg1 to graphic object arg0 */
         in->command_known[command] = cmvs_menu_bind(in->menus, arg(in, 2, 1), arg(in, 2, 0));
