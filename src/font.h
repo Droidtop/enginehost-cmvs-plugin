@@ -38,7 +38,18 @@ void cmvs_font_free(cmvs_font *f);
 const char *cmvs_font_path(const cmvs_font *f);
 
 /*
- * Rasterises one Unicode code point at `size` pixels em.
+ * Rasterises one Unicode code point at `size` pixels em, into a cell `cell`
+ * pixels wide.
+ *
+ * The cell is not advice: CMVS lays every character out on a fixed pitch of
+ * half an em for a single-byte character and a whole em for a double-byte one
+ * (0x00450a96 and 0x00450a5b), because the faces cmvs.cfg names - MS Gothic,
+ * Meiryo - draw their Latin glyphs on exactly that half-width pitch. A face
+ * with proportional Latin, which is what a machine's own CJK font usually is,
+ * draws an `m` wider than the pitch and the line runs into itself. So a glyph
+ * whose natural advance is wider than its cell is condensed horizontally to
+ * fit it, which is the same picture the original draws with the font it asked
+ * for. Pass 0 for no constraint.
  *
  * The bitmap is 8-bit coverage, `w` by `h`, and belongs to the font: it is
  * valid until the next call. `left` and `top` are where its top-left corner
@@ -47,7 +58,7 @@ const char *cmvs_font_path(const cmvs_font *f);
  * Returns NULL for a code point the face has no glyph for, and for a space,
  * which has an advance and no pixels.
  */
-const uint8_t *cmvs_font_glyph(cmvs_font *f, unsigned code, int size,
+const uint8_t *cmvs_font_glyph(cmvs_font *f, unsigned code, int size, int cell,
                                int *w, int *h, int *left, int *top);
 
 /* How far the pen moves after that code point, at that size. */

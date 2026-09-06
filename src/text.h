@@ -40,6 +40,7 @@ typedef struct {
     unsigned code;          /* Unicode, decoded from the script's cp932 */
     int x, y;               /* the pen, in the layer's coordinates */
     int size;               /* the em square it was laid out on */
+    int cell;               /* the pitch it was allotted: size, or size/2 */
     uint32_t colour;
     uint32_t edge;
     /*

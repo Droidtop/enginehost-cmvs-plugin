@@ -68,8 +68,8 @@ static int covers_the_game(const char *path)
     cmvs_font *f = cmvs_font_open(path);
     int w = 0, h = 0, ok;
     if (!f) return 0;
-    ok = cmvs_font_glyph(f, 'A', 30, &w, &h, NULL, NULL) != NULL && w > 0 && h > 0;
-    if (ok) ok = cmvs_font_glyph(f, 0x3042, 30, &w, &h, NULL, NULL) != NULL && w > 0 && h > 0;
+    ok = cmvs_font_glyph(f, 'A', 30, 0, &w, &h, NULL, NULL) != NULL && w > 0 && h > 0;
+    if (ok) ok = cmvs_font_glyph(f, 0x3042, 30, 0, &w, &h, NULL, NULL) != NULL && w > 0 && h > 0;
     cmvs_font_free(f);
     return ok;
 }
@@ -198,11 +198,11 @@ static float scale_for(cmvs_font *f, int size)
     return stbtt_ScaleForMappingEmToPixels(&f->info, (float) size);
 }
 
-const uint8_t *cmvs_font_glyph(cmvs_font *f, unsigned code, int size,
+const uint8_t *cmvs_font_glyph(cmvs_font *f, unsigned code, int size, int cell,
                                int *w, int *h, int *left, int *top)
 {
-    float scale;
-    int glyph, x0, y0, x1, y1, ascent, descent, gap;
+    float scale, wide;
+    int glyph, x0, y0, x1, y1, ascent, descent, gap, advance = 0, bearing = 0;
     uint8_t *bitmap;
 
     if (w) *w = 0;
@@ -215,10 +215,17 @@ const uint8_t *cmvs_font_glyph(cmvs_font *f, unsigned code, int size,
     if (glyph == 0) return NULL;
 
     scale = scale_for(f, size);
-    stbtt_GetGlyphBitmapBox(&f->info, glyph, scale, scale, &x0, &y0, &x1, &y1);
+    /* The cell the layout allotted, honoured by condensing rather than by
+     * overflowing into the next character. See the header. */
+    wide = scale;
+    stbtt_GetGlyphHMetrics(&f->info, glyph, &advance, &bearing);
+    if (cell > 0 && advance > 0 && advance * scale > (float) cell)
+        wide = (float) cell / (float) advance;
+
+    stbtt_GetGlyphBitmapBox(&f->info, glyph, wide, scale, &x0, &y0, &x1, &y1);
     if (x1 <= x0 || y1 <= y0) return NULL;   /* a space: an advance, no ink */
 
-    bitmap = stbtt_GetGlyphBitmap(&f->info, scale, scale, glyph, w, h, NULL, NULL);
+    bitmap = stbtt_GetGlyphBitmap(&f->info, wide, scale, glyph, w, h, NULL, NULL);
     if (!bitmap) return NULL;
     if (f->glyph) stbtt_FreeBitmap(f->glyph, NULL);
     f->glyph = bitmap;

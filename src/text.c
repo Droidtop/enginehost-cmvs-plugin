@@ -96,7 +96,7 @@ void cmvs_text_edge(cmvs_text *t, uint32_t edge) { t->edge = edge; }
 void cmvs_text_pen(cmvs_text *t, int x, int y) { t->pen_x = x; t->pen_y = y; }
 void cmvs_text_show(cmvs_text *t, int visible) { t->visible = visible ? 1 : 0; }
 
-static int append(cmvs_text *t, unsigned code, int x, int y)
+static int append(cmvs_text *t, unsigned code, int x, int y, int cell)
 {
     cmvs_glyph *g;
     if (t->glyphs == t->capacity) {
@@ -111,6 +111,7 @@ static int append(cmvs_text *t, unsigned code, int x, int y)
     g->x = x;
     g->y = y;
     g->size = t->size;
+    g->cell = cell;
     g->colour = t->colour;
     g->edge = t->edge;
     g->start = t->next_start;
@@ -159,7 +160,7 @@ void cmvs_text_draw(cmvs_text *t, const char *s)
             while (s[q] && s[q] != 0x2F && s[q] != 0x7D) {
                 unsigned code = cmvs_cp932_next(s, &q);
                 if (t->pen_x >= limit) newline(t);
-                append(t, code, t->pen_x, t->pen_y);
+                append(t, code, t->pen_x, t->pen_y, t->size);
                 t->pen_x += t->size + t->gap;
             }
             while (s[q] && s[q] != 0x7D) q++;
@@ -170,12 +171,12 @@ void cmvs_text_draw(cmvs_text *t, const char *s)
             unsigned short raw = (unsigned short) ((c << 8) | (unsigned char) s[p + 1]);
             unsigned code = cmvs_cp932_next(s, &p);
             if (t->pen_x >= limit && !(t->kinsoku && hangs(raw))) newline(t);
-            append(t, code, t->pen_x, t->pen_y);
+            append(t, code, t->pen_x, t->pen_y, t->size);
             t->pen_x += t->size + t->gap;
             continue;
         }
         if (t->pen_x >= limit) newline(t);
-        append(t, c, t->pen_x, t->pen_y);
+        append(t, c, t->pen_x, t->pen_y, t->size / 2);
         p++;
         /* A single-byte character is half a cell wide: 0x00450a96. */
         t->pen_x += t->size / 2 + t->gap;
@@ -254,7 +255,7 @@ void cmvs_text_compose(const cmvs_text *t, cmvs_font *font, uint8_t *frame,
         const cmvs_glyph *g = &t->glyph[i];
         int gw = 0, gh = 0, left = 0, top = 0, row, col;
         if (g->start > t->clock) break;   /* not typed yet */
-        const uint8_t *bits = cmvs_font_glyph(font, g->code, g->size,
+        const uint8_t *bits = cmvs_font_glyph(font, g->code, g->size, g->cell,
                                               &gw, &gh, &left, &top);
         if (!bits) continue;
         for (row = 0; row < gh; row++)
