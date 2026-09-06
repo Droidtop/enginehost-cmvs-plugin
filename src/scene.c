@@ -269,9 +269,15 @@ void cmvs_scene_font(cmvs_scene *s, cmvs_font *font) { if (s) s->font = font; }
 
 /* ------------------------------------------------------------------ blit */
 
-static void blend(uint8_t *dst, const uint8_t *src, int alpha)
+/*
+ * `opaque` is the image's own has_alpha, inverted: a PB3 with three channels
+ * leaves the alpha byte at zero for every pixel, so reading it would make a
+ * background invisible. bg990a.pb3, the first thing ChronoClock's played scene
+ * puts on the screen, is exactly that image.
+ */
+static void blend(uint8_t *dst, const uint8_t *src, int alpha, int opaque)
 {
-    int a = src[3] * alpha / 255;
+    int a = (opaque ? 255 : src[3]) * alpha / 255;
     if (a <= 0) return;
     if (a >= 255) { memcpy(dst, src, 4); dst[3] = 0xFF; return; }
     dst[0] = (uint8_t) ((src[0] * a + dst[0] * (255 - a)) / 255);
@@ -289,6 +295,18 @@ static void draw_item(cmvs_scene *s, const cmvs_object *o,
     int row, col;
 
     if (!it->used || !it->visible || !from || !from->pixels) return;
+    /*
+     * A source rectangle of nothing means the WHOLE bitmap. 0x0041b780 zeroes
+     * the draw item and command 0x044 writes exactly what the script gives it
+     * (0x0041bd00 is four stores and no defaulting), so snky01.ps3's
+     * background - object 29, bitmap bg990a.pb3, rectangle (0, 0, 0, 0),
+     * position (0, 0) - carries no size at all and would draw nothing if a
+     * zero rectangle were taken literally. The bitmap's own extent is what the
+     * engine falls back to; it is the only reading under which the scene has a
+     * background.
+     */
+    if (sw <= 0) sw = from->width - sx;
+    if (sh <= 0) sh = from->height - sy;
     if (sw <= 0 || sh <= 0) return;
 
     for (row = 0; row < sh; row++) {
@@ -299,7 +317,7 @@ static void draw_item(cmvs_scene *s, const cmvs_object *o,
             if (sc < 0 || sc >= from->width || dc < 0 || dc >= s->width) continue;
             blend(s->frame + 4 * ((size_t) dr * s->width + dc),
                   from->pixels + 4 * ((size_t) sr * from->width + sc),
-                  it->alpha);
+                  it->alpha, !from->has_alpha);
         }
     }
     s->drawn++;
@@ -336,8 +354,16 @@ const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
     if (!s) return NULL;
     memset(s->frame, 0, (size_t) s->width * s->height * 4);
     s->drawn = 0;
-    /* The layers carry the played scene and the graphic objects the interface
-     * the player reads over it, so the layers go down first. */
+    /*
+     * The graphic objects go down first and the display layers over them.
+     * snky01.ps3 is what settles it: the scene's BACKGROUND is graphic object
+     * 29 (bg990a.pb3, the summer sky, put there by procedure 33) and the
+     * message window with its line is display layer 0, so a reader sees the
+     * window over the sky and not the sky over the window. The title screen,
+     * which is graphic objects alone, is unaffected either way.
+     */
+    for (i = 0; i < CMVS_OBJECTS; i++)
+        if (s->object[i]) draw_object(s, s->object[i], NULL, 0, 0);
     for (i = CMVS_OBJECTS + CMVS_LAYERS - 1; i >= CMVS_OBJECTS; i--) {
         int layer = i - CMVS_OBJECTS;
         const cmvs_object *o = s->object[i];
@@ -349,8 +375,6 @@ const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
                           o ? o->item.x + o->item.ox : 0,
                           o ? o->item.y + o->item.oy : 0);
     }
-    for (i = 0; i < CMVS_OBJECTS; i++)
-        if (s->object[i]) draw_object(s, s->object[i], NULL, 0, 0);
     if (width) *width = s->width;
     if (height) *height = s->height;
     return s->frame;
