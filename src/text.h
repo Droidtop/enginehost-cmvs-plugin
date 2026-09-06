@@ -100,6 +100,16 @@ void cmvs_text_draw(cmvs_text *t, const char *cp932);
  * counts as one byte here, so a double-byte one counts two, which is what the
  * function's own counter does.
  */
+/*
+ * How wide a line is, in HALF-WIDTH units, on one line and with no box: a
+ * double-byte character counts two and a single-byte one counts one, an
+ * escape counts nothing at all, and a {base/reading} counts its base only.
+ * That is 0x004508c0, and command 0x119 is the script asking for it before it
+ * decides how wide to make the window. It needs no text object; the original
+ * passes one and never reads it.
+ */
+int cmvs_text_span(const char *s);
+
 int cmvs_text_measure(const cmvs_text *t, const char *cp932,
                       int *widest, int *last);
 

@@ -183,6 +183,34 @@ void cmvs_text_draw(cmvs_text *t, const char *s)
     }
 }
 
+int cmvs_text_span(const char *s)
+{
+    int wide = 0;
+    size_t p = 0;
+
+    if (!s) return 0;
+    while (s[p]) {
+        unsigned char c = (unsigned char) s[p];
+        if (c == 0x5C) {                  /* an escape is worth nothing */
+            p += (s[p + 1] == 'w') ? 3 : 2;
+            continue;
+        }
+        if (c == 0x7B) {                  /* {base/reading}: the base only */
+            p++;
+            while (s[p] && s[p] != 0x2F && s[p] != 0x7D) {
+                if (lead_byte((unsigned char) s[p]) && s[p + 1]) { wide += 2; p += 2; }
+                else { wide += 1; p += 1; }
+            }
+            while (s[p] && s[p] != 0x7D) p++;
+            if (s[p]) p++;
+            continue;
+        }
+        if (lead_byte(c) && s[p + 1]) { wide += 2; p += 2; }
+        else { wide += 1; p += 1; }
+    }
+    return wide;
+}
+
 int cmvs_text_measure(const cmvs_text *t, const char *s, int *widest, int *last)
 {
     int limit = t->rx + t->rw - t->size - t->gap;

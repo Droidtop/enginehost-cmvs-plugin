@@ -1245,6 +1245,24 @@ static int command_builtin(cmvs_interp *in, int command)
             in->command_known[command] = text != NULL;
         }
         return 0;
+    case 0x119: {
+        /*
+         * 0x00464250 -> 0x004508c0: how wide the line would be on one line,
+         * in half-width units. The script asks this before 0x112 for a line
+         * long enough to need wrapping and sizes the window from the answer;
+         * without it, snky01.ps3's second line got a box one character wide
+         * and wrapped itself into ribbons. It takes the +0xbb0 id like every
+         * other measurement, and the id is only checked, never used - the
+         * count is a property of the text, not of the box it will go in.
+         */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 2, 1));
+        const char *text = string_text(in, arg(in, 2, 0));
+        if (t && text) {
+            in->sys[0] = cmvs_text_span(text);
+            in->command_known[command] = 1;
+        }
+        return 0;
+    }
     case 0x112: {
         /* 0x004641c0 -> 0x004509a0: how the string would lay out. The script
          * centres its window on the answer, so a stale accumulator here put
