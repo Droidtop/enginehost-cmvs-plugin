@@ -20,6 +20,16 @@
  */
 #define CMVS_CMD_REPEAT  0x2000
 #define CMVS_CMD_ARGS(v) ((v) & 0xFF)   /* bytes of argument to pop */
+/*
+ * Not a bit of the engine's: it is how a handler here says "my return is
+ * complete, do not OR the table's constant into it". The table holds one
+ * constant per slot, and a handler in the exe that answers two ways could
+ * only ever have had one of them extracted - 0x153 answers 0xA000 while it
+ * waits and 0x400C when the wait is over, and 0x081 answers 0 when it has
+ * entered the script it loaded and 0x4008 when it could not. Stripped in
+ * do_command before the flags are read.
+ */
+#define CMVS_CMD_OWN     0x10000
 
 extern const int cmvs_command_abi[CMVS_COMMANDS];
 

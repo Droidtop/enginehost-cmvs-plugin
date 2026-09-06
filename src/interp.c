@@ -783,9 +783,10 @@ static int do_command(cmvs_interp *in, int command)
         int abi = (command >= 0 && command < CMVS_COMMANDS) ? cmvs_command_abi[command] : -1;
         int flags = command_builtin(in, command);
         if (abi < 0) abi = CMVS_CMD_ADVANCE;   /* extractor gap; see commands.c */
-        /* A handler that answers with CMVS_CMD_REPEAT has decided its own
+        /* A handler that answers with CMVS_CMD_OWN has decided its whole
          * return and the table's single constant does not apply to it. */
-        if (!(flags & CMVS_CMD_REPEAT)) flags |= abi;
+        if (!(flags & CMVS_CMD_OWN)) flags |= abi;
+        flags &= ~CMVS_CMD_OWN;
         /*
          * The argument pop is the engine's own bookkeeping and it belongs to
          * the SAME branch as the pc step: 0x0045AC80 tests bit 0x4000 and only
@@ -1080,10 +1081,10 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = 1;
         if (t && cmvs_text_revealing(t)) {
             if (click) cmvs_text_reveal_all(t);
-            return CMVS_CMD_REPEAT | CMVS_CMD_STOP;
+            return CMVS_CMD_OWN | CMVS_CMD_REPEAT | CMVS_CMD_STOP;
         }
-        if (!click) return CMVS_CMD_REPEAT | CMVS_CMD_STOP;
-        return CMVS_CMD_ADVANCE | 0x0C;
+        if (!click) return CMVS_CMD_OWN | CMVS_CMD_REPEAT | CMVS_CMD_STOP;
+        return CMVS_CMD_OWN | CMVS_CMD_ADVANCE | 0x0C;
     }
     case 0x155: { /* 0x00466b00 -> 0x004505b0: the edge colour */
         cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 2, 1));
@@ -1210,16 +1211,49 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = 1;
         return 0;
     case 0x081: {
+        /*
+         * 0x00463410 -> 0x0045b7d0, and it is not a load: it is a load AND A
+         * CALL. The routine takes a slot number the script chooses (0, 1 or 2;
+         * anything else is refused), loads the script one place higher because
+         * slot 0 is the running script that command 0x080 replaces, and then
+         * does exactly what 0x08a does - drop its own two arguments, step the
+         * pc past itself, push the repeat counter, the return pc and the
+         * caller's slot, and jump to the loaded script's header entry at 0x20.
+         * The loaded script runs to its own 0x0414 and returns here.
+         *
+         * That is how ChronoClock's start.ps3 gets its procedures: it loads
+         * intproc.ps3 and intcode.ps3, and those two run their own bodies,
+         * whose whole purpose is a run of command 0x088 registrations. While
+         * this command only loaded, procedures 33 and 34 were never registered,
+         * so every 0x08a to them did nothing - which is why the played scene
+         * built its message window and its text but never had a background:
+         * procedure 33 is what fills the background object.
+         *
+         * It answers 0 on success (the pc belongs to the loaded script now, so
+         * no advance and no pop) and 0x4008 when the load fails, which is why
+         * it declares its own return instead of taking the table's.
+         */
+        int32_t which = arg(in, 2, 1);
         int slot;
         char why[256];
         name = string_text(in, arg(in, 2, 0));
-        if (!name) return 0;
-        for (slot = 1; slot < MAX_SLOTS; slot++) if (!in->slot[slot].loaded) break;
-        if (slot < MAX_SLOTS && load_slot(in, slot, name, why, sizeof why)) {
-            in->command_known[command] = 1;
-            in->acc = slot;
+        if (!name || which < 0 || which >= 3)
+            return CMVS_CMD_OWN | CMVS_CMD_ADVANCE | 0x08;
+        slot = (int) which + 1;
+        if (!load_slot(in, slot, name, why, sizeof why)) {
+            if (in->trace) fprintf(stderr, "  cannot load %s: %s\n", name, why);
+            return CMVS_CMD_OWN | CMVS_CMD_ADVANCE | 0x08;
         }
-        return 0;
+        in->sp -= 8;
+        if (in->sp < 0) in->sp = 0;
+        in->pc += 2;
+        push(in, in->repeat);
+        push(in, in->pc);
+        push(in, in->current);
+        in->current = slot;
+        in->pc = in->slot[slot].script.entry;
+        in->command_known[command] = 1;
+        return CMVS_CMD_OWN;
     }
     default:
         return 0;
