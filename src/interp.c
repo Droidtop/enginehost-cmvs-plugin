@@ -263,6 +263,43 @@ static const char *string_text(cmvs_interp *in, int32_t value)
 }
 
 /*
+ * The same four storages, writable. lstrcpyA, lstrcatA and the substring
+ * command all write THROUGH a handle their caller passes, so a command needs
+ * the char* string_text hands out and the room left after it. The pool is the
+ * script's own constant text and is the one storage that is not writable; a
+ * command handed a pool handle as its destination writes nothing, which is
+ * what the original does too because the pool is in the loaded script image.
+ */
+static char *string_buffer(cmvs_interp *in, int32_t value, size_t *room)
+{
+    uint32_t u = (uint32_t) value, off = u & 0x3FFFFFFFu;
+    switch (u & CMVS_STR_TAG) {
+    case CMVS_STR_SCRIPT:
+        if (in->current < 0 || off >= SCRIPT_VARS) return NULL;
+        *room = (size_t) (SCRIPT_VARS - off);
+        return (char *) in->slot[in->current].vars + off;
+    case CMVS_STR_GLOBAL:
+        *room = GSTRING_SIZE;
+        return in->gstring[off % GSTRINGS];
+    case CMVS_STR_STACK: {
+        int at = in->frame[in->depth] + (int) off;
+        if (at < 0 || at >= STACK_BYTES) return NULL;
+        *room = (size_t) (STACK_BYTES - at);
+        return (char *) in->stack + at;
+    }
+    default:
+        return NULL;
+    }
+}
+
+/* cp932's lead bytes: the test 0x00406c20 makes, and the reason the substring
+ * command counts characters rather than bytes. */
+static int cmvs_lead_byte(unsigned char c)
+{
+    return (c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC);
+}
+
+/*
  * The handle an operand token stands for, from the epilogue at 0x00459992: the
  * token decides the tag and the operand is the offset. 0x122 is the one that
  * holds a handle rather than being one, so it is read out of the stack.
@@ -1101,6 +1138,82 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = 1;
         return 0;
     }
+    /* ------------------------------------------------------ the strings */
+    /*
+     * The script's own string library. ChronoClock wraps its message window
+     * around the line it is about to show, and this is what it does the
+     * wrapping with: it asks for the length, then walks the line a character
+     * at a time looking for a space, and it sizes the window from the answer.
+     * With none of these here, every one of those answers was whatever the
+     * last measurement had left in sys[0], and the window came out 330x450 -
+     * a tall narrow box in the bottom left corner instead of the wide strip
+     * the reader is meant to read across.
+     *
+     * Each writes through a handle its caller passes, and none of them
+     * allocates: the destination is a global, a script variable or a stack
+     * local, and the pool is refused because a script's constant text is not
+     * writable. See string_buffer above.
+     */
+    case 0x0F0: {   /* 0x00465120: lstrcpyA(dst, src) */
+        size_t room = 0;
+        char *dst = string_buffer(in, arg(in, 2, 1), &room);
+        const char *src = string_text(in, arg(in, 2, 0));
+        if (dst && src) snprintf(dst, room, "%s", src);
+        in->command_known[command] = dst != NULL && src != NULL;
+        return 0;
+    }
+    case 0x0F1: {   /* 0x00465160: the two are the same text, 1 or 0 */
+        const char *a = string_text(in, arg(in, 2, 1));
+        const char *b = string_text(in, arg(in, 2, 0));
+        in->sys[0] = (a && b && strcmp(a, b) == 0) ? 1 : 0;
+        in->command_known[command] = a != NULL && b != NULL;
+        return 0;
+    }
+    case 0x0F2: {   /* 0x004651b0: lstrcatA(dst, src) */
+        size_t room = 0, have;
+        char *dst = string_buffer(in, arg(in, 2, 1), &room);
+        const char *src = string_text(in, arg(in, 2, 0));
+        if (dst && src) {
+            have = strlen(dst);
+            if (have < room) snprintf(dst + have, room - have, "%s", src);
+        }
+        in->command_known[command] = dst != NULL && src != NULL;
+        return 0;
+    }
+    case 0x0F3: {   /* 0x004651f0: dst = the `count` characters at `start` */
+        size_t room = 0;
+        char *dst = string_buffer(in, arg(in, 4, 3), &room);
+        const char *src = string_text(in, arg(in, 4, 2));
+        int at = arg(in, 4, 1), end = at + arg(in, 4, 0), taken = 0;
+        size_t put = 0;
+        in->sys[0] = 0;
+        if (!dst || !src || at < 0 || room == 0) return 0;
+        /*
+         * The engine's own loop (0x00465243): it steps BYTES from `start` to
+         * `start + count` and copies a whole character each time, so a
+         * two-byte one costs two of the count. sys[0] counts characters.
+         */
+        while (at < end && src[at]) {
+            unsigned char c = (unsigned char) src[at];
+            int len = cmvs_lead_byte(c) && src[at + 1] ? 2 : 1;
+            if (put + (size_t) len + 1 > room) break;
+            memcpy(dst + put, src + at, (size_t) len);
+            put += (size_t) len;
+            at += len;
+            taken++;
+        }
+        dst[put] = 0;
+        in->sys[0] = taken;
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x0F8:     /* 0x00465460: lstrlenA, in bytes */
+        {
+            const char *text = string_text(in, arg(in, 1, 0));
+            in->sys[0] = text ? (int32_t) strlen(text) : 0;
+            in->command_known[command] = text != NULL;
+        }
+        return 0;
     case 0x112: {
         /* 0x004641c0 -> 0x004509a0: how the string would lay out. The script
          * centres its window on the answer, so a stale accumulator here put
