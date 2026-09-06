@@ -8,12 +8,14 @@
 # place: it steps a session and hands Java the pixels the engine composed.
 #
 # What is left needs no library at all beyond the C runtime: the archive and
-# image codecs are the engine's own.
+# image codecs are the engine's own, and the one vendored header, stb_truetype
+# in third_party/, compiles inside src/font.c.
 
 cmake_minimum_required(VERSION 3.22)
 project(cmvs C)
 
 set(ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../src)
+set(VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party)
 
 file(GLOB ENGINE_SOURCES CONFIGURE_DEPENDS ${ENGINE_DIR}/*.c)
 list(REMOVE_ITEM ENGINE_SOURCES ${ENGINE_DIR}/main.c ${ENGINE_DIR}/png.c)
@@ -24,6 +26,6 @@ if(NOT ENGINE_SOURCES)
 endif()
 
 add_library(cmvs SHARED ${ENGINE_SOURCES} jni.c)
-target_include_directories(cmvs PRIVATE ${ENGINE_DIR})
+target_include_directories(cmvs PRIVATE ${ENGINE_DIR} ${VENDOR_DIR})
 target_compile_options(cmvs PRIVATE -std=c11 -Wall -Wextra -Wno-unused-parameter -O2)
 target_link_libraries(cmvs PRIVATE log m)

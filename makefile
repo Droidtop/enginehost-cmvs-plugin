@@ -22,13 +22,13 @@ OBJECTS  := $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(CSOURCES))
 CC       := gcc
 CSTD     := -std=c11
 WARN     := -Wall -Wextra -Wno-unused-parameter
-CFLAGS   := $(CSTD) $(WARN) -O2 -g -I$(SRCDIR) $(shell sdl2-config --cflags)
+CFLAGS   := $(CSTD) $(WARN) -O2 -g -I$(SRCDIR) -Ithird_party $(shell sdl2-config --cflags)
 LDFLAGS  := $(shell sdl2-config --libs) -lm -lz
 
 # make DEBUG=1 turns on the sanitizers, which is how the format code gets its
 # bounds checks exercised against real game data.
 ifdef DEBUG
-CFLAGS  := $(CSTD) $(WARN) -O0 -g -fsanitize=address,undefined -I$(SRCDIR) $(shell sdl2-config --cflags)
+CFLAGS  := $(CSTD) $(WARN) -O0 -g -fsanitize=address,undefined -I$(SRCDIR) -Ithird_party $(shell sdl2-config --cflags)
 LDFLAGS := -fsanitize=address,undefined $(shell sdl2-config --libs) -lm -lz
 endif
 
