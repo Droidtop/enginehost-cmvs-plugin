@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,14 @@
  */
 #define ARCHIVE_MAX 32
 
+/*
+ * How many loose files under the game folder are remembered for the by-name
+ * search. ChronoClock's tree holds about two hundred; the bound is here so a
+ * game with a huge unpacked folder degrades to "not found" rather than to
+ * unbounded memory, and it is reported when it is reached.
+ */
+#define LOOSE_MAX 4096
+
 struct cmvs_game {
     char folder[512];
     char pack[1024];            /* absolute, with a trailing slash */
@@ -24,6 +33,16 @@ struct cmvs_game {
     char archive_name[ARCHIVE_MAX][64];
     int archives;
     int script_archive;         /* index of the archive that holds scripts */
+
+    /* Every loose file under the game folder, indexed on the first sound the
+     * scripts ask for and kept for the rest of the session. The two strings
+     * are on the heap because a game's own folder names decide how long a path
+     * is, and a fixed row wide enough for the deepest of them would be mostly
+     * air in every other one. */
+    int loose_indexed;
+    int loose;
+    char *loose_name[LOOSE_MAX];
+    char *loose_path[LOOSE_MAX];
 };
 
 int cmvs_game_archives(const cmvs_game *g) { return g ? g->archives : 0; }
@@ -149,6 +168,7 @@ void cmvs_game_close(cmvs_game *g)
     int i;
     if (!g) return;
     for (i = 0; i < g->archives; i++) if (g->archive[i]) cpz_close(g->archive[i]);
+    for (i = 0; i < g->loose; i++) { free(g->loose_name[i]); free(g->loose_path[i]); }
     free(g);
 }
 
@@ -274,6 +294,94 @@ static int decode_here(cpz_archive *a, const cpz_entry *e, pb3_image *img,
     ok = pb3_decode(data, size, load_base, &ctx, img, err, errlen);
     free(data);
     return ok;
+}
+
+/*
+ * A named sound, wherever the game keeps it.
+ *
+ * A script asks for "bgm37.ogg" or "sys101.ogg" and nothing in the name says
+ * where it is: ChronoClock keeps its music loose in data/music beside the pack
+ * folder, its effects under wave/ inside se.cpz and its voices inside
+ * voice2.cpz, and the engine binary names none of those. So the name is
+ * searched for the same way an image name is - archive by archive, then by
+ * leaf - and the loose half of the search walks the game folder once and
+ * remembers what it found, because a folder full of music is read every time a
+ * scene changes otherwise.
+ *
+ * The loose index deliberately holds every file it meets rather than a chosen
+ * set of extensions: which extensions a CMVS game ships is the game's business.
+ */
+/* strdup is not in C11 and this tree builds as -std=c11 on both machines. */
+static char *dup_string(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *copy = malloc(n);
+    if (copy) memcpy(copy, s, n);
+    return copy;
+}
+
+static void index_folder(cmvs_game *g, const char *path, int depth)
+{
+    DIR *d;
+    struct dirent *e;
+
+    if (depth > 3) return;                  /* data/<kind>/<sub>/ is as deep as it goes */
+    d = opendir(path);
+    if (!d) return;
+    while ((e = readdir(d))) {
+        char child[1600];
+        struct stat st;
+        if (e->d_name[0] == '.') continue;
+        snprintf(child, sizeof child, "%s/%s", path, e->d_name);
+        if (stat(child, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            index_folder(g, child, depth + 1);
+        } else if (g->loose < LOOSE_MAX) {
+            char *name = dup_string(e->d_name);
+            char *full = dup_string(child);
+            if (!name || !full) { free(name); free(full); continue; }
+            g->loose_name[g->loose] = name;
+            g->loose_path[g->loose] = full;
+            g->loose++;
+        }
+    }
+    closedir(d);
+}
+
+static void index_loose(cmvs_game *g)
+{
+    if (g->loose_indexed) return;
+    g->loose_indexed = 1;
+    index_folder(g, g->folder, 0);
+}
+
+uint8_t *cmvs_game_sound(cmvs_game *g, const char *name, int *size_out,
+                         char *err, size_t errlen)
+{
+    char why[512];
+    int i;
+
+    if (!g || !name || !name[0]) return NULL;
+
+    index_loose(g);
+    for (i = 0; i < g->loose; i++) {
+        if (strcasecmp(g->loose_name[i], name)) continue;
+        uint8_t *data = read_loose(g->loose_path[i], size_out);
+        if (data) return data;
+    }
+
+    for (i = 0; i < g->archives; i++) {
+        const cpz_entry *e;
+        if (!g->archive[i]) continue;
+        e = cpz_find(g->archive[i], name);
+        if (!e) e = cpz_find_leaf(g->archive[i], name);
+        if (!e) continue;
+        return cpz_read(g->archive[i], e, size_out, err, errlen);
+    }
+
+    snprintf(why, sizeof why, "no sound named %.200s in the game", name);
+    fail(err, errlen, why);
+    return NULL;
 }
 
 int cmvs_game_image(cmvs_game *g, const char *name, pb3_image *out,

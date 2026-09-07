@@ -52,6 +52,15 @@ cpz_archive *cmvs_game_archive(const cmvs_game *g, int i);
 const char *cmvs_game_archive_name(const cmvs_game *g, int i);
 const char *cmvs_game_pack(const cmvs_game *g);
 
+/*
+ * A sound by the name a script names it with ("bgm37.ogg", "sys101.ogg"). A
+ * loose file anywhere under the game folder wins over an archive entry, which
+ * is how a game keeps its music outside the pack and how a patched game
+ * replaces one track. The caller frees what comes back.
+ */
+uint8_t *cmvs_game_sound(cmvs_game *g, const char *name, int *size_out,
+                         char *err, size_t errlen);
+
 /* Decodes an image by entry name, searching every archive that holds images. */
 int cmvs_game_image(cmvs_game *g, const char *name, pb3_image *out,
                     char *err, size_t errlen);
