@@ -7,8 +7,9 @@
 # container with no display checks a frame. jni.c beside this file takes their
 # place: it steps a session and hands Java the pixels the engine composed.
 #
-# What is left needs no library at all beyond the C runtime: the archive, image
-# and Ogg codecs are the engine's own, and the two vendored files in
+# What is left needs the C runtime and AAudio, which is the device jni.c opens
+# for the engine's mixer to play into; the archive, image and Ogg codecs are the
+# engine's own, and the two vendored files in
 # third_party/ compile inside the src file that uses them - stb_truetype.h
 # inside src/font.c and stb_vorbis.c inside src/audio.c - so this glob never has
 # to name a vendored file.
@@ -30,4 +31,4 @@ endif()
 add_library(cmvs SHARED ${ENGINE_SOURCES} jni.c)
 target_include_directories(cmvs PRIVATE ${ENGINE_DIR} ${VENDOR_DIR})
 target_compile_options(cmvs PRIVATE -std=c11 -Wall -Wextra -Wno-unused-parameter -O2)
-target_link_libraries(cmvs PRIVATE log m)
+target_link_libraries(cmvs PRIVATE log m aaudio)

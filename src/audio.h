@@ -46,6 +46,14 @@ void cmvs_audio_free(cmvs_audio *audio);
 int cmvs_audio_rate(const cmvs_audio *audio);
 
 /*
+ * The rate the frontend's device actually opened at. A device is not asked for
+ * a rate, it is told one and answers with the one it took, so the mixer is
+ * built before the device exists and corrected once it does; a sound already
+ * playing has its resampling step recomputed rather than being restarted.
+ */
+void cmvs_audio_set_rate(cmvs_audio *audio, int rate);
+
+/*
  * Starts a named file on a bank, replacing what it held. Returns 1, or 0 when
  * no archive and no loose file has that name - worth logging, because it means
  * a name the script built rather than one the game ships.

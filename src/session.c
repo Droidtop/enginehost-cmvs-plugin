@@ -138,6 +138,11 @@ void cmvs_session_mix(cmvs_session *s, int16_t *out, int frames)
     cmvs_audio_mix(s ? cmvs_interp_audio(s->interp) : NULL, out, frames);
 }
 
+void cmvs_session_audio_open(cmvs_session *s, int rate)
+{
+    if (s) cmvs_audio_set_rate(cmvs_interp_audio(s->interp), rate);
+}
+
 const char *cmvs_session_script(const cmvs_session *s)
 {
     return s ? cmvs_interp_script(s->interp) : "";

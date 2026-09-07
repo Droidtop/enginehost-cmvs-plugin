@@ -445,6 +445,43 @@ static int run_headless(cmvs_session *s, const run_options *o)
     return report(s, o, rc, err);
 }
 
+/*
+ * SDL asks for samples on its own thread and the engine mixes into whatever it
+ * is handed, which is safe: the mixer takes its own lock and touches nothing
+ * else in the session, so the bytecode keeps running on this thread meanwhile.
+ * This is the desktop's half of the arrangement the wrapper makes with AAudio -
+ * the engine mixes, a frontend plays, and neither frontend's device is the
+ * engine's business.
+ */
+static void feed_sound(void *user, Uint8 *stream, int bytes)
+{
+    cmvs_session_mix((cmvs_session *) user, (int16_t *) stream, bytes / 4);
+}
+
+/*
+ * Opens the machine's sound device and tells the session the rate it actually
+ * took, which is the device's answer and not this program's request. A machine
+ * with no device still runs the game; it just cannot be heard, and --wav is
+ * how a container proves the sound without one.
+ */
+static void open_sound(cmvs_session *s)
+{
+    SDL_AudioSpec want, got;
+    memset(&want, 0, sizeof want);
+    want.freq = cmvs_session_audio_rate(s);
+    want.format = AUDIO_S16SYS;
+    want.channels = 2;
+    want.samples = 1024;
+    want.callback = feed_sound;
+    want.userdata = s;
+    if (SDL_OpenAudio(&want, &got) != 0) {
+        fprintf(stderr, "no sound: %s\n", SDL_GetError());
+        return;
+    }
+    cmvs_session_audio_open(s, got.freq);
+    SDL_PauseAudio(0);
+}
+
 static int run_window(cmvs_session *s, const run_options *o)
 {
     char err[256] = {0};
@@ -454,7 +491,7 @@ static int run_window(cmvs_session *s, const run_options *o)
     SDL_Texture *texture;
     int rc = 1, frame = 0, alive = 1;
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
@@ -468,6 +505,7 @@ static int run_window(cmvs_session *s, const run_options *o)
         SDL_Quit();
         return 1;
     }
+    open_sound(s);
 
     while (alive) {
         SDL_Event ev;
@@ -523,6 +561,7 @@ static int run_window(cmvs_session *s, const run_options *o)
     SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
+    SDL_CloseAudio();
     SDL_Quit();
     return report(s, o, rc, err);
 }

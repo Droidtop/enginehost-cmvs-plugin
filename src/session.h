@@ -55,6 +55,11 @@ void cmvs_session_navigate(cmvs_session *s, int direction);
 int cmvs_session_audio_rate(const cmvs_session *s);
 void cmvs_session_mix(cmvs_session *s, int16_t *out, int frames);
 
+/* Says what rate the frontend's device opened at, which is the device's answer
+ * and not the frontend's request. Everything already playing is resampled to
+ * it from the next block on. */
+void cmvs_session_audio_open(cmvs_session *s, int rate);
+
 /* What is running, for a status line or a log. */
 const char *cmvs_session_script(const cmvs_session *s);
 long cmvs_session_statements(const cmvs_session *s);

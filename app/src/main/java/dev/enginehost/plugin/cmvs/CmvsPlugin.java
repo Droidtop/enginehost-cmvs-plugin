@@ -141,12 +141,16 @@ public final class CmvsPlugin implements EnginePlugin {
     private void start() {
         if (running) return;
         running = true;
+        nativeSound(engine, true);
         clock.post(tick);
     }
 
+    /** The sound stops with the frame loop. A reader who puts the game down
+     * should not go on hearing its music over whatever they moved to. */
     private void stop() {
         running = false;
         clock.removeCallbacks(tick);
+        if (engine != 0) nativeSound(engine, false);
     }
 
     private final Runnable tick = new Runnable() {
@@ -295,4 +299,5 @@ public final class CmvsPlugin implements EnginePlugin {
     private static native void nativeButton(long engine, int button, boolean down);
     private static native void nativeNavigate(long engine, int direction);
     private static native int nativeMenuEvents(long engine);
+    private static native void nativeSound(long engine, boolean sounding);
 }

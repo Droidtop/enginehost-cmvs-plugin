@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <aaudio/AAudio.h>
 #include <android/log.h>
 
 #include "session.h"
@@ -30,6 +31,83 @@ static const char *java_string(JNIEnv *env, jstring value, const char **release)
     if (value == NULL) return NULL;
     *release = (*env)->GetStringUTFChars(env, value, NULL);
     return *release;
+}
+
+/*
+ * Sound: the device, which the engine deliberately does not open.
+ *
+ * The engine mixes and a frontend plays, because the two frontends open
+ * different devices - SDL2 in the desktop runner, AAudio here - and AAudio asks
+ * for samples on a thread of its own. That is safe: the mixer takes its own
+ * lock and touches nothing else in the session, so the bytecode keeps running
+ * on the main thread while this thread pulls blocks out of it.
+ *
+ * The stream and the session it feeds are file statics for the same reason
+ * last_error is: the host runs one game at a time, and a handle for a device
+ * that exists once would be a handle to carry through Java for nothing. The
+ * stream is stopped and closed before the session is, so the callback cannot
+ * be running when the mixer goes away.
+ */
+static AAudioStream *sound_stream;
+static cmvs_session *sound_session;
+
+static aaudio_data_callback_result_t feed_sound(AAudioStream *stream, void *user,
+                                                void *frames, int32_t count)
+{
+    cmvs_session_mix(sound_session, (int16_t *) frames, count);
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+/*
+ * A device is told a rate and answers with the one it took, so the session is
+ * corrected to whatever came back rather than the engine assuming. No sound is
+ * not a reason to refuse the game: a run with a silent device still reads.
+ */
+static void open_sound(cmvs_session *session)
+{
+    AAudioStreamBuilder *builder = NULL;
+    aaudio_result_t opened;
+
+    if (AAudio_createStreamBuilder(&builder) != AAUDIO_OK) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "no sound: AAudio will not start");
+        return;
+    }
+    AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setChannelCount(builder, 2);
+    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_NONE);
+    AAudioStreamBuilder_setDataCallback(builder, feed_sound, NULL);
+    opened = AAudioStreamBuilder_openStream(builder, &sound_stream);
+    AAudioStreamBuilder_delete(builder);
+    if (opened != AAUDIO_OK) {
+        sound_stream = NULL;
+        __android_log_print(ANDROID_LOG_WARN, TAG, "no sound: %s",
+                            AAudio_convertResultToText(opened));
+        return;
+    }
+    sound_session = session;
+    cmvs_session_audio_open(session, AAudioStream_getSampleRate(sound_stream));
+    AAudioStream_requestStart(sound_stream);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "sound open at %d Hz",
+                        cmvs_session_audio_rate(session));
+}
+
+/* The reader put the game down: the frame loop stops, and so must the sound,
+ * or the music plays on over whatever they went to instead. */
+static void pause_sound(int sounding)
+{
+    if (!sound_stream) return;
+    if (sounding) AAudioStream_requestStart(sound_stream);
+    else AAudioStream_requestPause(sound_stream);
+}
+
+static void close_sound(void)
+{
+    if (sound_stream) {
+        AAudioStream_requestStop(sound_stream);
+        AAudioStream_close(sound_stream);
+        sound_stream = NULL;
+    }
+    sound_session = NULL;
 }
 
 JNIEXPORT jlong JNICALL
@@ -52,6 +130,7 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeOpen(JNIEnv *env, jclass klass,
     __android_log_print(ANDROID_LOG_INFO, TAG, "session open, %dx%d, in %s",
                         cmvs_session_width(session), cmvs_session_height(session),
                         cmvs_session_script(session));
+    open_sound(session);
     return (jlong) (intptr_t) session;
 }
 
@@ -64,6 +143,7 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeError(JNIEnv *env, jclass klass
 JNIEXPORT void JNICALL
 Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeClose(JNIEnv *env, jclass klass, jlong handle)
 {
+    close_sound();
     cmvs_session_close((cmvs_session *) (intptr_t) handle);
 }
 
@@ -169,6 +249,13 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeMenuEvents(JNIEnv *env, jclass 
     if (session == NULL) return 0;
     count = cmvs_session_menu_events(session, &last);
     return (jint) ((count & 0xFFFF) | ((last & 0xFF) << 16));
+}
+
+JNIEXPORT void JNICALL
+Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeSound(JNIEnv *env, jclass klass,
+                                                       jlong handle, jboolean sounding)
+{
+    pause_sound(sounding == JNI_TRUE);
 }
 
 JNIEXPORT jstring JNICALL

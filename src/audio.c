@@ -96,6 +96,20 @@ void cmvs_audio_free(cmvs_audio *audio)
 
 int cmvs_audio_rate(const cmvs_audio *audio) { return audio ? audio->rate : 0; }
 
+void cmvs_audio_set_rate(cmvs_audio *audio, int rate)
+{
+    int i;
+    if (!audio || rate <= 0 || rate == audio->rate) return;
+    pthread_mutex_lock(&audio->lock);
+    audio->rate = rate;
+    for (i = 0; i < CHANNELS; i++) {
+        channel *slot = &audio->channel[i];
+        if (slot->in_use && slot->source_rate > 0)
+            slot->step = (double) slot->source_rate / (double) rate;
+    }
+    pthread_mutex_unlock(&audio->lock);
+}
+
 static double clamp_volume(int volume)
 {
     if (volume < 0) return 0.0;
