@@ -7,9 +7,11 @@
 # container with no display checks a frame. jni.c beside this file takes their
 # place: it steps a session and hands Java the pixels the engine composed.
 #
-# What is left needs no library at all beyond the C runtime: the archive and
-# image codecs are the engine's own, and the one vendored header, stb_truetype
-# in third_party/, compiles inside src/font.c.
+# What is left needs no library at all beyond the C runtime: the archive, image
+# and Ogg codecs are the engine's own, and the two vendored files in
+# third_party/ compile inside the src file that uses them - stb_truetype.h
+# inside src/font.c and stb_vorbis.c inside src/audio.c - so this glob never has
+# to name a vendored file.
 
 cmake_minimum_required(VERSION 3.22)
 project(cmvs C)

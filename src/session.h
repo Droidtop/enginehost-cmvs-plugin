@@ -45,6 +45,16 @@ void cmvs_session_pointer(cmvs_session *s, int x, int y);
 void cmvs_session_button(cmvs_session *s, int button, int down);
 void cmvs_session_navigate(cmvs_session *s, int direction);
 
+/*
+ * Sound. The engine mixes and the frontend plays: open a device with two
+ * channels of interleaved 16-bit samples at cmvs_session_audio_rate(), then
+ * call cmvs_session_mix from that device's own thread for every block it
+ * wants. Silence comes back when nothing is playing, so it is always safe to
+ * call, and a frontend with no device simply never calls it.
+ */
+int cmvs_session_audio_rate(const cmvs_session *s);
+void cmvs_session_mix(cmvs_session *s, int16_t *out, int frames);
+
 /* What is running, for a status line or a log. */
 const char *cmvs_session_script(const cmvs_session *s);
 long cmvs_session_statements(const cmvs_session *s);

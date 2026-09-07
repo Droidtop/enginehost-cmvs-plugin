@@ -314,7 +314,67 @@ typedef struct {
     int click_frame[CLICKS];
     int clicks;
     int hold;
+    const char *wav;
 } run_options;
+
+/*
+ * The sound the run made, as a RIFF file.
+ *
+ * A container has no sound card, so the only way to prove that a scene's music
+ * and its effects came out of the mixer is to keep them: --wav mixes one
+ * frame's worth of samples after every frame the engine runs and writes the
+ * lot, so what the run played can be listened to or measured afterwards. The
+ * frontends on a real machine hand the same blocks to a device instead.
+ */
+typedef struct {
+    FILE *f;
+    long frames;
+    int rate;
+} wav_writer;
+
+static void wav_word(FILE *f, unsigned value, int bytes)
+{
+    int i;
+    for (i = 0; i < bytes; i++) fputc((int) ((value >> (8 * i)) & 0xFF), f);
+}
+
+static int wav_open(wav_writer *w, const char *path, int rate)
+{
+    w->f = fopen(path, "wb");
+    w->frames = 0;
+    w->rate = rate;
+    if (!w->f) return 0;
+    fwrite("RIFF----WAVEfmt ", 1, 16, w->f);
+    wav_word(w->f, 16, 4);              /* the size of this chunk */
+    wav_word(w->f, 1, 2);               /* PCM */
+    wav_word(w->f, 2, 2);               /* two channels */
+    wav_word(w->f, (unsigned) rate, 4);
+    wav_word(w->f, (unsigned) rate * 4, 4);
+    wav_word(w->f, 4, 2);               /* bytes per frame */
+    wav_word(w->f, 16, 2);              /* bits per sample */
+    fwrite("data----", 1, 8, w->f);
+    return 1;
+}
+
+static void wav_write(wav_writer *w, const int16_t *samples, int frames)
+{
+    int i;
+    if (!w->f) return;
+    for (i = 0; i < frames * 2; i++) wav_word(w->f, (unsigned) (uint16_t) samples[i], 2);
+    w->frames += frames;
+}
+
+static void wav_close(wav_writer *w)
+{
+    if (!w->f) return;
+    fseek(w->f, 4, SEEK_SET);
+    wav_word(w->f, (unsigned) (36 + w->frames * 4), 4);
+    fseek(w->f, 40, SEEK_SET);
+    wav_word(w->f, (unsigned) (w->frames * 4), 4);
+    fclose(w->f);
+    printf("%ld frames of sound at %d Hz written\n", w->frames, w->rate);
+    w->f = NULL;
+}
 
 /*
  * The window shows the game's own screen scaled and centred, which is the same
@@ -356,6 +416,13 @@ static int run_headless(cmvs_session *s, const run_options *o)
 {
     char err[256] = {0};
     int rc = 1, frame, i;
+    wav_writer wav = {0};
+    int rate = cmvs_session_audio_rate(s);
+    int per_frame = rate * 16 / 1000;   /* the engine's own frame, 16 ms */
+    int16_t *block = NULL;
+
+    if (o->wav && wav_open(&wav, o->wav, rate))
+        block = malloc((size_t) per_frame * 2 * sizeof *block);
 
     for (frame = 0; frame < o->frames && rc > 0; frame++) {
         if (o->has_point) cmvs_session_pointer(s, o->point_x, o->point_y);
@@ -367,8 +434,14 @@ static int run_headless(cmvs_session *s, const run_options *o)
             if (frame == o->click_frame[i] + o->hold) cmvs_session_button(s, 0, 0);
         }
         rc = cmvs_session_frame(s, err, sizeof err);
+        if (block) {
+            cmvs_session_mix(s, block, per_frame);
+            wav_write(&wav, block, per_frame);
+        }
         if (o->trace) fprintf(stderr, "-- frame %d ends in %s\n", frame, cmvs_session_script(s));
     }
+    free(block);
+    wav_close(&wav);
     return report(s, o, rc, err);
 }
 
@@ -508,6 +581,8 @@ int main(int argc, char **argv)
             } else if (!strcmp(argv[i], "--click") && i + 1 < argc) {
                 if (o.clicks < CLICKS) o.click_frame[o.clicks++] = atoi(argv[++i]);
                 else i++;
+            } else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
+                o.wav = argv[++i];
             } else if (!strcmp(argv[i], "--hold") && i + 1 < argc) {
                 o.hold = atoi(argv[++i]);
                 if (o.hold < 1) o.hold = 1;

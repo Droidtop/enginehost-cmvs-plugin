@@ -128,6 +128,16 @@ void cmvs_session_navigate(cmvs_session *s, int direction)
     if (s) cmvs_input_navigate(cmvs_interp_input(s->interp), direction);
 }
 
+int cmvs_session_audio_rate(const cmvs_session *s)
+{
+    return s ? cmvs_audio_rate(cmvs_interp_audio(s->interp)) : 0;
+}
+
+void cmvs_session_mix(cmvs_session *s, int16_t *out, int frames)
+{
+    cmvs_audio_mix(s ? cmvs_interp_audio(s->interp) : NULL, out, frames);
+}
+
 const char *cmvs_session_script(const cmvs_session *s)
 {
     return s ? cmvs_interp_script(s->interp) : "";

@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "audio.h"
 #include "game.h"
 #include "input.h"
 #include "scene.h"
@@ -71,6 +72,12 @@ cmvs_scene *cmvs_interp_scene(cmvs_interp *in);
 /* What the commands have drawn into. The runner reads it for a screenshot; the
  * Android wrapper will read it for the frame it hands to the surface. */
 cmvs_scene *cmvs_interp_scene(cmvs_interp *in);
+
+/* The mixer the sound commands play into. A frontend opens its own device at
+ * cmvs_audio_rate() and calls cmvs_audio_mix from that device's thread; the
+ * engine never opens one, because the desktop's is SDL2 and Android's is
+ * AAudio. */
+cmvs_audio *cmvs_interp_audio(cmvs_interp *in);
 
 /* Where a frontend puts the pointer and the buttons. The menus read it on
  * command 0x217 and nothing else touches it, so a frontend that reports no

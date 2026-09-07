@@ -31,6 +31,7 @@ typedef struct {
 struct cmvs_interp {
     cmvs_game *game;
     cmvs_scene *scene;
+    cmvs_audio *audio;           /* the music at +0xc58 and the effects at +0xc54 */
     cmvs_menus *menus;           /* the six at +0xc6c */
     cmvs_input input;            /* the device at +0xcb8 */
 
@@ -122,6 +123,12 @@ cmvs_interp *cmvs_interp_new(cmvs_game *game)
     if (!in->scene) { free(in); return NULL; }
     in->menus = cmvs_menus_new();
     if (!in->menus) { cmvs_scene_free(in->scene); free(in); return NULL; }
+    /*
+     * 48 kHz because that is what both frontends' devices want and resampling
+     * once, here, is cheaper than doing it in each of them. A game whose sounds
+     * are recorded at another rate is resampled by the mixer.
+     */
+    in->audio = cmvs_audio_new(game, 48000);
     return in;
 }
 
@@ -131,6 +138,7 @@ void cmvs_interp_free(cmvs_interp *in)
     if (!in) return;
     for (i = 0; i < MAX_SLOTS; i++)
         if (in->slot[i].loaded) cmvs_script_close(&in->slot[i].script);
+    cmvs_audio_free(in->audio);
     cmvs_menus_free(in->menus);
     cmvs_scene_free(in->scene);
     free(in);
@@ -138,6 +146,8 @@ void cmvs_interp_free(cmvs_interp *in)
 
 void cmvs_interp_trace(cmvs_interp *in, int on) { in->trace = on; }
 cmvs_scene *cmvs_interp_scene(cmvs_interp *in) { return in->scene; }
+cmvs_audio *cmvs_interp_audio(cmvs_interp *in) { return in ? in->audio : NULL; }
+
 cmvs_input *cmvs_interp_input(cmvs_interp *in) { return in ? &in->input : NULL; }
 int cmvs_interp_menu_events(const cmvs_interp *in, int *last_item)
 {
@@ -1133,6 +1143,60 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = t && text;
         return 0;
     }
+    /* -------------------------------------------------------- the sound */
+    /*
+     * Two subsystems, and the engine keeps them apart: the music at +0xc58 is
+     * one stream and the effects at +0xc54 are six banks, which 0x004625a0 and
+     * 0x004627e0 both bound at five before putting bank N on channel N + 9.
+     * Both name their sound as a file - "bgm37.ogg", "sys101.ogg" - and the
+     * file layer searches for it, because where a game keeps its sound is the
+     * game's arrangement and not the engine's.
+     *
+     * The volume the original computes is (+0x614 * +0x618) >> 8 for music and
+     * (+0x614 * +0x61c) >> 8 for an effect, out of the settings block a player
+     * moves with the SYSTEM menu. That block is not modelled yet, so both play
+     * at full and the mixer's own 0..255 is what the settings will feed when it
+     * is.
+     */
+    case 0x0A0: {   /* 0x00461dd0 -> 0x00477db0: play music */
+        const char *name = string_text(in, arg(in, 3, 2));
+        int loop = arg(in, 3, 0) != 0;
+        in->command_known[command] =
+            name && cmvs_audio_play(in->audio, CMVS_SOUND_MUSIC, 0, name, loop, 255);
+        return 0;
+    }
+    case 0x0A1:     /* 0x00477c50 called straight: stop the music now */
+        cmvs_audio_stop(in->audio, CMVS_SOUND_MUSIC, 0, 0);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x0A2:     /* 0x00461ec0 -> 0x00477d40: fade it out over milliseconds */
+        cmvs_audio_stop(in->audio, CMVS_SOUND_MUSIC, 0, arg(in, 1, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x0A3:     /* 0x00461ef0 -> 0x00477cb0, answering in sys[0] */
+        in->sys[0] = cmvs_audio_playing(in->audio, CMVS_SOUND_MUSIC, 0);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x0B0: {   /* 0x004625a0 -> 0x00476150: play an effect on a bank */
+        const char *name = string_text(in, arg(in, 5, 3));
+        int bank = arg(in, 5, 4);
+        int loop = arg(in, 5, 1) != 0;
+        /*
+         * The third argument scales the bank's volume, and the original folds
+         * it in the same way it folds the two settings: (volume * scale) >> 8,
+         * skipped when the scale is not positive.
+         */
+        int32_t scale = arg(in, 5, 2);
+        int volume = scale > 0 ? (int) ((255 * scale) >> 8) : 255;
+        in->command_known[command] =
+            name && cmvs_audio_play(in->audio, CMVS_SOUND_EFFECT, bank, name,
+                                    loop, volume);
+        return 0;
+    }
+    case 0x0B3:     /* 0x004628b0 -> 0x00475740: stop a bank and forget its name */
+        cmvs_audio_stop(in->audio, CMVS_SOUND_EFFECT, arg(in, 1, 0), 0);
+        in->command_known[command] = 1;
+        return 0;
     /* ---------------------------------------------------- the input poll */
     /*
      * The device at +0xcb8 keeps a released/held/pressed triple for each of
