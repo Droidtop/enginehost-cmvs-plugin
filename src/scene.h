@@ -35,6 +35,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "camera.h"
 #include "game.h"
 #include "text.h"
 
@@ -99,6 +100,22 @@ void cmvs_scene_depth(cmvs_scene *s, int object, int part, int depth);
 /* Command 0x215 shows a menu item's part (0x00432B70 sets +0xc38). A part
  * that has been hidden is not composed. */
 void cmvs_scene_show(cmvs_scene *s, int object, int part, int visible);
+
+/*
+ * The staged half of the scene. Commands 0x042 (0x0041beb0) and 0x043
+ * (0x0041bec0) turn an item from a flat one, placed by 0x045, into one the
+ * camera places: kind 2 goes through camera 0 and kind 3 through camera 1,
+ * and the compositor draws each kind in its own pass. The world position is
+ * commands 0x072, 0x073 and 0x074; 0x070 is the depth at which the item is
+ * drawn at its own size and 0x071 a lift added after the projection.
+ */
+void cmvs_scene_kind(cmvs_scene *s, int object, int part, int kind);
+void cmvs_scene_world(cmvs_scene *s, int object, int part, int axis, float v);
+void cmvs_scene_plane(cmvs_scene *s, int object, int part, float v);
+void cmvs_scene_world_lift(cmvs_scene *s, int object, int part, float v);
+
+/* The scene's cameras, for the 0x05x family and 0x062 to configure. */
+cmvs_camera *cmvs_scene_camera(cmvs_scene *s, int index);
 
 /* Composes everything into one BGRA frame, top-down, stride 4 * width. The
  * buffer belongs to the scene. */

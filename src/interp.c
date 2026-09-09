@@ -1265,6 +1265,144 @@ static int command_builtin(cmvs_interp *in, int command)
         cmvs_scene_depth(in->scene, arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0));
         in->command_known[command] = 1;
         return 0;
+    /* --------------------------------------------------- the staged scene */
+    /*
+     * An item is flat until one of these says otherwise. 0x042 (0x0045f800 ->
+     * 0x0041beb0) writes 2 into the item's first field and 0x043 (0x0045f8b0
+     * -> 0x0041bec0) writes 2 or 3, and the compositor reads that field to
+     * decide whether the item places itself or a camera places it. Everything
+     * ChronoClock stages so far is kind 2.
+     */
+    case 0x042:   /* 0x0045f800 -> 0x00433460 -> 0x0041beb0 */
+        cmvs_scene_kind(in->scene, arg(in, 2, 1), arg(in, 2, 0), 2);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x043:   /* 0x0045f8b0 -> 0x00433470 -> 0x0041bec0 */
+        cmvs_scene_kind(in->scene, arg(in, 3, 2), arg(in, 3, 1),
+                        arg(in, 3, 0) != 0 ? 3 : 2);
+        in->command_known[command] = 1;
+        return 0;
+    /*
+     * The world half of a draw item. Every one of these handlers reaches its
+     * setter with `fld dword ptr [ecx-0xc]`, so the argument is the BIT
+     * PATTERN of a float and statement 0x0202 is what puts it on the stack.
+     *   0x070 -> 0x0041bf10, item +0x3c: the depth the item is drawn 1:1 at
+     *   0x071 -> 0x0041bf20, item +0x40: a lift added after the projection
+     *   0x072 -> 0x00443c20, item +0x2c: where it stands, across
+     *   0x073 -> 0x0041bee0, item +0x30: and up
+     *   0x074 -> 0x0041bef0, item +0x34: and out
+     */
+    case 0x070:   /* 0x004611b0 -> 0x00433480 */
+        cmvs_scene_plane(in->scene, arg(in, 3, 2), arg(in, 3, 1),
+                         as_float(arg(in, 3, 0)));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x071:   /* 0x00461230 -> 0x004334a0 */
+        cmvs_scene_world_lift(in->scene, arg(in, 3, 2), arg(in, 3, 1),
+                              as_float(arg(in, 3, 0)));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x072:   /* 0x004612b0 -> 0x004334c0 */
+        cmvs_scene_world(in->scene, arg(in, 3, 2), arg(in, 3, 1), 0,
+                         as_float(arg(in, 3, 0)));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x073:   /* 0x00461330 -> 0x004334e0 */
+        cmvs_scene_world(in->scene, arg(in, 3, 2), arg(in, 3, 1), 1,
+                         as_float(arg(in, 3, 0)));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x074:   /* 0x004613b0 -> 0x00433500 */
+        cmvs_scene_world(in->scene, arg(in, 3, 2), arg(in, 3, 1), 2,
+                         as_float(arg(in, 3, 0)));
+        in->command_known[command] = 1;
+        return 0;
+    /* ------------------------------------------------------- the cameras */
+    /*
+     * All of these name the camera they act on as their last argument and
+     * reach it through 0x00422900, which is a plain index into the array at
+     * world+8. 0x062 is the same as 0x05a for camera 0 alone.
+     */
+    case 0x058: {   /* 0x00461530 -> 0x00443b00 */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, arg(in, 4, 3));
+        if (c) {
+            c->reference_depth = as_float(arg(in, 4, 0));
+            c->view_height = as_float(arg(in, 4, 1));
+            c->view_width = as_float(arg(in, 4, 2));
+        }
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x059: {   /* 0x00461590 -> 0x00443b20: and with it the centre */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, arg(in, 3, 2));
+        if (c) {
+            c->screen_width = as_float(arg(in, 3, 1));
+            c->screen_height = as_float(arg(in, 3, 0));
+            c->centre_x = c->screen_width / 2.0f;
+            c->centre_y = c->screen_height / 2.0f;
+        }
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x05A: {   /* 0x004615e0 -> 0x00443b50: where it stands */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, arg(in, 4, 3));
+        if (c) {
+            c->x = as_float(arg(in, 4, 2));
+            c->y = as_float(arg(in, 4, 1));
+            c->z = as_float(arg(in, 4, 0));
+        }
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x05B: {   /* 0x004616e0 -> 0x00443be0, camera +0x38 */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, arg(in, 2, 1));
+        if (c) c->spin = as_float(arg(in, 2, 0));
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x05C: {   /* 0x00461720 -> 0x00443c20, camera +0x2c */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, arg(in, 2, 1));
+        if (c) c->lift = as_float(arg(in, 2, 0));
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x05E: {   /* 0x00461760 -> 0x00443ae0, camera +0x94 */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, arg(in, 2, 1));
+        if (c) c->alternate = arg(in, 2, 0) != 0;
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x05F: {   /* 0x004617a0 -> 0x004532a0: which projection it is */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, arg(in, 2, 1));
+        if (c) c->kind = arg(in, 2, 0);
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x062: {   /* 0x00461980 -> 0x00443b50 on camera 0 (0x00418ab0) */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, 0);
+        if (c) {
+            c->x = as_float(arg(in, 3, 2));
+            c->y = as_float(arg(in, 3, 1));
+            c->z = as_float(arg(in, 3, 0));
+        }
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x066: {   /* 0x004617d0 -> 0x00443c30, camera +0x9c */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, arg(in, 2, 1));
+        if (c) c->mode = arg(in, 2, 0);
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x067: {   /* 0x00461690 -> 0x00443bc0, camera +0x44 and +0x48 */
+        cmvs_camera *c = cmvs_scene_camera(in->scene, arg(in, 3, 2));
+        if (c) {
+            c->aspect_x = as_float(arg(in, 3, 1));
+            c->aspect_y = as_float(arg(in, 3, 0));
+        }
+        in->command_known[command] = 1;
+        return 0;
+    }
     /* ------------------------------------------------------- layer sprites */
     /*
      * The eight display layers, and the family the played scene is made of.

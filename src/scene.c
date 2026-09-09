@@ -26,6 +26,13 @@ typedef struct {
     int depth;                   /* +0x28: the draw order, command 0x047 */
     int alpha;
     int opacity;
+    /*
+     * +0x00, and with it the other half of the item. Zero is the flat item
+     * the constructor leaves behind, placed by its own 0x045; 2 and 3 are what
+     * commands 0x042 and 0x043 write, and they mean the camera places it.
+     */
+    int kind;
+    cmvs_placement world;        /* +0x2c..+0x40, +0x48, +0x4c */
 } cmvs_item;
 
 typedef struct cmvs_object {
@@ -44,6 +51,7 @@ struct cmvs_scene {
      * 0x00451d30 reaches a layer's sprites with the object family's own
      * accessor and there is nothing to tell apart below that call. */
     cmvs_object *object[CMVS_OBJECTS + CMVS_LAYERS];
+    cmvs_camera camera[CMVS_CAMERAS];
     cmvs_text text[CMVS_LAYERS];
     int of_id[CMVS_TEXT_IDS];    /* the table at +0xbb0: which layer's text */
     cmvs_font *font;
@@ -60,6 +68,8 @@ static cmvs_object *object_new(void)
     o->item.opacity = 0x100;
     o->item.mode = 1;
     o->item.visible = 1;
+    o->item.world.scale_x = 1.0f;
+    o->item.world.scale_y = 1.0f;
     return o;
 }
 
@@ -87,6 +97,7 @@ cmvs_scene *cmvs_scene_new(cmvs_game *game, int width, int height)
     if (!s->frame) { free(s); return NULL; }
     for (i = 0; i < CMVS_LAYERS; i++) cmvs_text_init(&s->text[i]);
     for (i = 0; i < CMVS_TEXT_IDS; i++) s->of_id[i] = -1;
+    for (i = 0; i < CMVS_CAMERAS; i++) cmvs_camera_init(&s->camera[i]);
     return s;
 }
 
@@ -209,6 +220,8 @@ int cmvs_scene_item(cmvs_scene *s, int object, int part)
     o->item.visible = 1;
     o->item.alpha = 0xFF;
     o->item.opacity = 0x100;
+    o->item.world.scale_x = 1.0f;
+    o->item.world.scale_y = 1.0f;
     return 1;
 }
 
@@ -260,6 +273,42 @@ void cmvs_scene_depth(cmvs_scene *s, int object, int part, int depth)
     o->item.depth = depth;
 }
 
+void cmvs_scene_kind(cmvs_scene *s, int object, int part, int kind)
+{
+    cmvs_object *o = reach(s, object, part);
+    if (!o) return;
+    o->item.kind = kind;
+}
+
+void cmvs_scene_world(cmvs_scene *s, int object, int part, int axis, float v)
+{
+    cmvs_object *o = reach(s, object, part);
+    if (!o) return;
+    if (axis == 0) o->item.world.x = v;
+    else if (axis == 1) o->item.world.y = v;
+    else o->item.world.z = v;
+}
+
+void cmvs_scene_plane(cmvs_scene *s, int object, int part, float v)
+{
+    cmvs_object *o = reach(s, object, part);
+    if (!o) return;
+    o->item.world.plane = v;
+}
+
+void cmvs_scene_world_lift(cmvs_scene *s, int object, int part, float v)
+{
+    cmvs_object *o = reach(s, object, part);
+    if (!o) return;
+    o->item.world.lift = v;
+}
+
+cmvs_camera *cmvs_scene_camera(cmvs_scene *s, int index)
+{
+    if (!s || index < 0 || index >= CMVS_CAMERAS) return NULL;
+    return &s->camera[index];
+}
+
 cmvs_text *cmvs_scene_text(cmvs_scene *s, int layer)
 {
     if (!s || layer < 0 || layer >= CMVS_LAYERS) return NULL;
@@ -306,15 +355,40 @@ static void blend(uint8_t *dst, const uint8_t *src, int alpha, int opaque)
     dst[3] = 0xFF;
 }
 
+/*
+ * Which camera places a staged item: 0x00435f7e reads camera 0 for kind 2
+ * (0x00418ab0, world+8) and camera 1 for kind 3 (0x00416ed0, world+0xc).
+ */
+static const cmvs_camera *camera_of(const cmvs_scene *s, const cmvs_item *it)
+{
+    return &s->camera[it->kind == 3 ? 1 : 0];
+}
+
+/* Answers where the camera puts this item, or 0 when the item is a flat one
+ * or the camera refuses it. */
+static int staged(const cmvs_scene *s, const cmvs_item *it, cmvs_projection *at)
+{
+    if (it->kind != 2 && it->kind != 3) return 0;
+    return cmvs_camera_project(camera_of(s, it), &it->world, at);
+}
+
+/*
+ * One item, at a place and a scale its caller has already worked out. The
+ * loop walks the DESTINATION so a scaled item costs what it covers rather
+ * than what it came from; at scale 1 the source and destination steps are the
+ * same pixel, so a staged scene composed at its own depth is byte for byte
+ * what the flat blit used to produce.
+ */
 static void draw_item(cmvs_scene *s, const cmvs_object *o,
-                      const pb3_image *from, int ox, int oy)
+                      const pb3_image *from, float dx, float dy,
+                      float scale_x, float scale_y, int alpha)
 {
     const cmvs_item *it = &o->item;
     int sw = it->sw, sh = it->sh, sx = it->sx, sy = it->sy;
-    int dx = ox + it->x - it->ox, dy = oy + it->y - it->oy;
-    int row, col;
+    int dw, dh, row, col, ix, iy;
 
     if (!it->used || !it->visible || !from || !from->pixels) return;
+    if (alpha <= 0) return;
     /*
      * A source rectangle of nothing means the WHOLE bitmap. 0x0041b780 zeroes
      * the draw item and command 0x044 writes exactly what the script gives it
@@ -328,16 +402,27 @@ static void draw_item(cmvs_scene *s, const cmvs_object *o,
     if (sw <= 0) sw = from->width - sx;
     if (sh <= 0) sh = from->height - sy;
     if (sw <= 0 || sh <= 0) return;
+    if (scale_x <= 0.0f || scale_y <= 0.0f) return;
 
-    for (row = 0; row < sh; row++) {
-        int sr = sy + row, dr = dy + row;
-        if (sr < 0 || sr >= from->height || dr < 0 || dr >= s->height) continue;
-        for (col = 0; col < sw; col++) {
-            int sc = sx + col, dc = dx + col;
-            if (sc < 0 || sc >= from->width || dc < 0 || dc >= s->width) continue;
+    dw = (int) (sw * scale_x + 0.5f);
+    dh = (int) (sh * scale_y + 0.5f);
+    if (dw <= 0 || dh <= 0) return;
+    ix = (int) (dx < 0.0f ? dx - 0.5f : dx + 0.5f);
+    iy = (int) (dy < 0.0f ? dy - 0.5f : dy + 0.5f);
+
+    for (row = 0; row < dh; row++) {
+        int dr = iy + row;
+        int sr = sy + (int) ((row + 0.5f) / scale_y);
+        if (dr < 0 || dr >= s->height) continue;
+        if (sr < 0 || sr >= from->height) continue;
+        for (col = 0; col < dw; col++) {
+            int dc = ix + col;
+            int sc = sx + (int) ((col + 0.5f) / scale_x);
+            if (dc < 0 || dc >= s->width) continue;
+            if (sc < 0 || sc >= from->width) continue;
             blend(s->frame + 4 * ((size_t) dr * s->width + dc),
                   from->pixels + 4 * ((size_t) sr * from->width + sc),
-                  it->alpha, !from->has_alpha);
+                  alpha, !from->has_alpha);
         }
     }
     s->drawn++;
@@ -354,23 +439,129 @@ static void draw_item(cmvs_scene *s, const cmvs_object *o,
  * where on the screen it ends up. The typed line is what shows it: snky01.ps3
  * lays its glyph sprites out at x = 0, 30, 60, ... and y = 0, and they belong
  * inside a message window whose object sits at y = 540.
+ *
+ * A STAGED item ignores all of that. Its place is not its own to give: the
+ * camera puts its anchor somewhere on the screen and the bitmap hangs off that
+ * point, which is why ChronoClock's rooftop background - anchored at its own
+ * centre and never given a position - belongs in the middle of the frame and
+ * not at (-910, -512).
  */
 static void draw_object(cmvs_scene *s, const cmvs_object *o,
-                        const pb3_image *inherited, int ox, int oy)
+                        const pb3_image *inherited, float ox, float oy,
+                        float scale_x, float scale_y, int alpha)
 {
     const pb3_image *from = o->has_bitmap ? &o->bitmap : inherited;
-    int i;
+    const cmvs_item *it = &o->item;
+    float dx, dy, sx = scale_x, sy = scale_y;
+    int i, a = alpha * it->alpha / 255;
+    cmvs_projection at;
+
     if (!o) return;
-    draw_item(s, o, from, ox, oy);
-    ox += o->item.x + o->item.ox;
-    oy += o->item.y + o->item.oy;
+    if (staged(s, it, &at)) {
+        sx = at.scale_x;
+        sy = at.scale_y;
+        dx = at.x - it->ox * sx;
+        dy = at.y - it->oy * sy;
+        a = a * at.alpha / 255;
+        draw_item(s, o, from, dx, dy, sx, sy, a);
+        for (i = 0; i < CMVS_PARTS; i++)
+            if (o->part[i]) draw_object(s, o->part[i], from, dx, dy, sx, sy, a);
+        return;
+    }
+    dx = ox + (it->x - it->ox) * sx;
+    dy = oy + (it->y - it->oy) * sy;
+    draw_item(s, o, from, dx, dy, sx, sy, a);
+    ox += (it->x + it->ox) * sx;
+    oy += (it->y + it->oy) * sy;
     for (i = 0; i < CMVS_PARTS; i++)
-        if (o->part[i]) draw_object(s, o->part[i], from, ox, oy);
+        if (o->part[i]) draw_object(s, o->part[i], from, ox, oy, sx, sy, a);
+}
+
+/*
+ * The pass an item belongs to. 0x00435e7f and 0x00435f7e turn the item's first
+ * field into an index into the compositor's list array: kind 1 goes to 0, kind
+ * 2 to 2, kind 3 to 6 and everything else to 3, and the lists are drawn in
+ * that order. It is what keeps a staged background behind the flat interface
+ * drawn over it without either of them naming the other.
+ */
+static int pass_of(const cmvs_item *it)
+{
+    if (it->kind == 1) return 0;
+    if (it->kind == 2) return 2;
+    if (it->kind == 3) return 6;
+    return 3;
+}
+
+static void compose_flat_pass(cmvs_scene *s, int pass)
+{
+    int i, order = 0, any = 0;
+    /*
+     * They go down in the order command 0x047 gives them (item +0x28), not in
+     * object number: snky01.ps3 puts its background at 32 and the character
+     * sprite that stands in front of it at 99, while the sprite is object 20
+     * and the background object 29. By number the background wins and the girl
+     * is behind her own scenery. Equal orders keep their object number as the
+     * tie-break, which is what the title screen relies on.
+     */
+    for (i = 0; i < CMVS_OBJECTS; i++) {
+        if (!s->object[i] || pass_of(&s->object[i]->item) != pass) continue;
+        if (!any || s->object[i]->item.depth < order) order = s->object[i]->item.depth;
+        any = 1;
+    }
+    while (any) {
+        int next = 0, more = 0;
+        for (i = 0; i < CMVS_OBJECTS; i++)
+            if (s->object[i] && pass_of(&s->object[i]->item) == pass
+                && s->object[i]->item.depth == order)
+                draw_object(s, s->object[i], NULL, 0.0f, 0.0f, 1.0f, 1.0f, 255);
+        for (i = 0; i < CMVS_OBJECTS; i++) {
+            if (!s->object[i] || pass_of(&s->object[i]->item) != pass) continue;
+            if (s->object[i]->item.depth <= order) continue;
+            if (!more || s->object[i]->item.depth < next) next = s->object[i]->item.depth;
+            more = 1;
+        }
+        if (!more) break;
+        order = next;
+    }
+}
+
+/*
+ * A staged pass goes far to near. 0x00435bc0 keeps its list in descending key
+ * order and the key for a staged item is its distance in front of the camera
+ * (0x0041bc80 plus the camera's own z at 0x00443d80), so the far background
+ * lands before the character standing in front of it - the same answer command
+ * 0x047 gives a flat scene, taken from the world instead of from a number.
+ */
+static void compose_staged_pass(cmvs_scene *s, int pass)
+{
+    int i, drawn[CMVS_OBJECTS], count = 0, done = 0;
+    for (i = 0; i < CMVS_OBJECTS; i++) {
+        if (!s->object[i] || pass_of(&s->object[i]->item) != pass) continue;
+        drawn[count++] = i;
+    }
+    while (done < count) {
+        int best = -1;
+        float far = 0.0f;
+        for (i = 0; i < count; i++) {
+            const cmvs_object *o;
+            float d;
+            if (drawn[i] < 0) continue;
+            o = s->object[drawn[i]];
+            d = o->item.world.z - camera_of(s, &o->item)->z;
+            if (best < 0 || d > far) { best = i; far = d; }
+        }
+        if (best < 0) break;
+        draw_object(s, s->object[drawn[best]], NULL, 0.0f, 0.0f, 1.0f, 1.0f, 255);
+        drawn[best] = -1;
+        done++;
+    }
 }
 
 const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
 {
-    int i, order, any = 0;
+    static const int order[] = { 0, 2, 3, 6 };
+    size_t p;
+    int i;
     if (!s) return NULL;
     memset(s->frame, 0, (size_t) s->width * s->height * 4);
     s->drawn = 0;
@@ -382,37 +573,14 @@ const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
      * window over the sky and not the sky over the window. The title screen,
      * which is graphic objects alone, is unaffected either way.
      */
-    /*
-     * And they go down in the order command 0x047 gives them (item +0x28),
-     * not in object number: snky01.ps3 puts its background at 32 and the
-     * character sprite that stands in front of it at 99, while the sprite is
-     * object 20 and the background object 29. By number the background wins
-     * and the girl is behind her own scenery. Equal orders keep their object
-     * number as the tie-break, which is what the title screen relies on.
-     */
-    order = 0;
-    for (i = 0; i < CMVS_OBJECTS; i++) {
-        if (!s->object[i]) continue;
-        if (!any || s->object[i]->item.depth < order) order = s->object[i]->item.depth;
-        any = 1;
-    }
-    while (any) {
-        int next = 0, more = 0;
-        for (i = 0; i < CMVS_OBJECTS; i++)
-            if (s->object[i] && s->object[i]->item.depth == order)
-                draw_object(s, s->object[i], NULL, 0, 0);
-        for (i = 0; i < CMVS_OBJECTS; i++) {
-            if (!s->object[i] || s->object[i]->item.depth <= order) continue;
-            if (!more || s->object[i]->item.depth < next) next = s->object[i]->item.depth;
-            more = 1;
-        }
-        if (!more) break;
-        order = next;
+    for (p = 0; p < sizeof order / sizeof *order; p++) {
+        if (order[p] == 2 || order[p] == 6) compose_staged_pass(s, order[p]);
+        else compose_flat_pass(s, order[p]);
     }
     for (i = CMVS_OBJECTS + CMVS_LAYERS - 1; i >= CMVS_OBJECTS; i--) {
         int layer = i - CMVS_OBJECTS;
         const cmvs_object *o = s->object[i];
-        if (o) draw_object(s, o, NULL, 0, 0);
+        if (o) draw_object(s, o, NULL, 0.0f, 0.0f, 1.0f, 1.0f, 255);
         /* The line goes over the window it is written in, and the window is
          * the layer's own object: the message box sits at y = 540 and the pen
          * counts from there. */
