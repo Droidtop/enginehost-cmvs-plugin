@@ -9,6 +9,7 @@
 #
 #   make            build bin/cmvs
 #   make run GAME=/path/to/game
+#   make test       build and run the offline tests
 #
 # ------------------------------------------------------------------------------
 
@@ -18,6 +19,13 @@ BUILDDIR := bin
 
 CSOURCES := $(wildcard $(SRCDIR)/*.c)
 OBJECTS  := $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(CSOURCES))
+
+# Everything but the desktop runner, so a test can bring its own main().
+LIBOBJECTS := $(filter-out $(BUILDDIR)/main.o,$(OBJECTS))
+
+# Which games the archive tests get to try. Only ChronoClock is on this
+# machine; name more and they are tested too, which is the point.
+GAMES ?= $(wildcard /root/re/chronoclock)
 
 CC       := gcc
 CSTD     := -std=c11
@@ -32,7 +40,7 @@ CFLAGS  := $(CSTD) $(WARN) -O0 -g -fsanitize=address,undefined -I$(SRCDIR) -Ithi
 LDFLAGS := -fsanitize=address,undefined $(shell sdl2-config --libs) -lm -lz
 endif
 
-.PHONY: all clean run
+.PHONY: all clean run test
 
 all: $(BUILDDIR)/$(TARGET)
 
@@ -44,6 +52,14 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
+
+# The tests need no display, no device and no network: they read the scheme
+# table and whatever real archives this machine happens to have.
+test: $(BUILDDIR)/test_schemes
+	$(BUILDDIR)/test_schemes $(GAMES)
+
+$(BUILDDIR)/test_schemes: tests/test_schemes.c $(LIBOBJECTS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -o $@ tests/test_schemes.c $(LIBOBJECTS) $(LDFLAGS)
 
 run: all
 	$(BUILDDIR)/$(TARGET) $(GAME)
