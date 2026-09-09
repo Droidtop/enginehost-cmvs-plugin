@@ -426,6 +426,27 @@ static int32_t float_stack(const cmvs_interp *in, int at)
 }
 
 /*
+ * The other half of "a float and an int are the same four bytes". The float
+ * grammar keeps its values in the very storages the integer grammar reads, and
+ * it leaves its answer in the accumulator at +0x13d30 as a BIT PATTERN
+ * (0x0045a73b is an `fst`, not an ftol), which is how a command like 0x073
+ * receives a real float through a stack of dwords.
+ */
+static float as_float(int32_t bits)
+{
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
+static int32_t as_bits(float f)
+{
+    int32_t bits;
+    memcpy(&bits, &f, sizeof bits);
+    return bits;
+}
+
+/*
  * The value of one expression node, from the resolver at 0x457fc0. Its jump
  * table (0x458354 into 0x45830C) is what says which token means which storage:
  * 0x100 immediate, 0x101 an int global, 0x102 a flag, 0x103 and 0x122 locals
@@ -502,6 +523,93 @@ static void assign(cmvs_interp *in, int token, int32_t operand, int32_t value)
     }
 }
 
+/*
+ * The FLOAT resolver, 0x004585d0, jump table 0x4589dc into 0x458990. It is the
+ * same set of storages as the integer one and differs in exactly one thing:
+ * what the bytes mean. An integer storage is converted with `fild` on the way
+ * out; the four float storages are read with `fld`, unconverted. So a value is
+ * not float because of where it lives but because of which grammar reads it.
+ *
+ * 0x12A is the float literal and its value comes from the NODE, not from the
+ * operand word: the parser at 0x0045a5a7 does `fld [eax+ebx+2]`, and the same
+ * dword read by the integer grammar is rounded to an int instead (0x00459512).
+ * 0x10E converts as UNSIGNED (0x004586d0 adds 2^32 to a negative), because a
+ * label is an address.
+ */
+static float resolve_float(cmvs_interp *in, int token, int32_t operand, float literal)
+{
+    int base = in->frame[in->depth];
+    switch (token) {
+    case 0x100: return (float) operand;
+    case 0x101: return (float) global_get(in, operand);
+    case 0x102: return (float) flag_get(in, operand);
+    case 0x103: return (float) stack_get(in, base - operand);
+    case 0x104: case 0x106: case 0x107: return (float) script_var(in, operand);
+    case 0x108: case 0x10A: case 0x10B: return (float) stack_get(in, base + operand);
+    case 0x10E: {
+        const cmvs_script *s = code(in);
+        if (operand >= 0 && operand < s->index_count)
+            return (float) (uint32_t) s->index[operand];
+        return 0.0f;
+    }
+    case 0x10F:
+        return (operand >= 0 && operand < (int32_t) (sizeof in->sys / sizeof in->sys[0]))
+             ? (float) in->sys[operand] : 0.0f;
+    /* The five string operands append and are worth nothing, exactly as in the
+     * integer resolver: 0x0045886b, 0x0045887d, 0x004588ac, 0x0045894e,
+     * 0x00458961. */
+    case 0x120: case 0x121: case 0x125: case 0x127:
+        string_append(in, string_text(in, string_handle(in, token, operand)));
+        return 0.0f;
+    case 0x122:
+        string_append(in, string_text(in, stack_get(in, base - operand)));
+        return 0.0f;
+    case 0x129: return as_float(stack_get(in, base - operand));
+    case 0x12A: return literal;
+    case 0x12B:
+        return (operand >= 0 && operand < FGLOBALS) ? in->fglobals[operand] : 0.0f;
+    case 0x12C: case 0x132: case 0x133:
+        return as_float(stack_get(in, base + operand));
+    case 0x12E: case 0x130: case 0x131:
+        return as_float(script_var(in, operand));
+    default: return 0.0f;
+    }
+}
+
+/*
+ * The float store, 0x00458a40, table 0x458e38 into 0x458df0. An integer
+ * storage takes the value through _ftol (0x0052bc90, which truncates toward
+ * zero); a float storage takes the four bytes as they are.
+ */
+static void assign_float(cmvs_interp *in, int token, int32_t operand, float v)
+{
+    int base = in->frame[in->depth];
+    int32_t truncated = (int32_t) v;
+    switch (token) {
+    case 0x101: global_set(in, operand, truncated); break;
+    case 0x102: flag_set(in, operand, truncated); break;
+    case 0x103: stack_set(in, base - operand, truncated); break;
+    case 0x104: case 0x106: case 0x107: set_script_var(in, operand, truncated); break;
+    case 0x108: case 0x10A: case 0x10B: stack_set(in, base + operand, truncated); break;
+    case 0x10F:
+        if (operand >= 0 && operand < (int32_t) (sizeof in->sys / sizeof in->sys[0]))
+            in->sys[operand] = truncated;
+        break;
+    case 0x129: stack_set(in, base - operand, as_bits(v)); break;
+    case 0x12B:
+        if (operand >= 0 && operand < FGLOBALS) in->fglobals[operand] = v;
+        break;
+    case 0x12C: case 0x132: case 0x133:
+        stack_set(in, base + operand, as_bits(v));
+        break;
+    case 0x12E: case 0x130: case 0x131:
+        set_script_var(in, operand, as_bits(v));
+        break;
+    case 0x121: case 0x125: case 0x127: string_store(in, token, operand); break;
+    default: break;
+    }
+}
+
 /* ------------------------------------------------------------ expressions */
 
 /*
@@ -510,7 +618,7 @@ static void assign(cmvs_interp *in, int token, int32_t operand, int32_t value)
  * nodes rather than values because an assignment needs its destination token
  * and operand, not just the value the destination currently has.
  */
-typedef struct { int token; int32_t operand; } node;
+typedef struct { int token; int32_t operand; float literal; } node;
 
 #define MAX_NODES 128
 
@@ -519,11 +627,12 @@ typedef struct {
     int count;
 } nodes;
 
-static void node_push(nodes *st, int token, int32_t operand)
+static void node_push(nodes *st, int token, int32_t operand, float literal)
 {
     if (st->count < MAX_NODES) {
         st->n[st->count].token = token;
         st->n[st->count].operand = operand;
+        st->n[st->count].literal = literal;
         st->count++;
     }
 }
@@ -549,6 +658,60 @@ static int32_t binary(int token, int32_t a, int32_t b)
     case 0x16F: return a || b;
     case 0x171: return a == b;
     case 0x172: return a != b;
+    default: return b;
+    }
+}
+
+/*
+ * The float grammar's operators, 0x00459c14 onwards through the table at
+ * 0x45a864. Arithmetic and the comparisons are done on the FPU; the bitwise
+ * ones, the shifts and the remainder go through _ftol first and come back with
+ * `fild`, so `1.5 & 1` is 1.0 and not a bit pattern. A comparison answers 1.0
+ * or 0.0, never a bit. Division is not guarded because the original is not:
+ * x87 answers infinity where the integer grammar would have trapped.
+ */
+static float binary_float(int token, float a, float b)
+{
+    int32_t x = (int32_t) a, y = (int32_t) b;
+    switch (token) {
+    case 0x160: return a * b;                                   /* fmul */
+    case 0x161: return a / b;                                   /* fdivr */
+    case 0x162: return y ? (float) (x % y) : 0.0f;
+    case 0x163: return a + b;                                   /* fadd */
+    case 0x164: return a - b;                                   /* fsubr */
+    case 0x165: return (float) (x & y);
+    case 0x166: return (float) (x | y);
+    case 0x167: return (float) (x ^ y);
+    case 0x168: return (float) (int32_t) ((uint32_t) x << (y & 31));
+    case 0x169: return (float) (x >> (y & 31));
+    case 0x16A: return a > b ? 1.0f : 0.0f;
+    case 0x16B: return a >= b ? 1.0f : 0.0f;
+    case 0x16C: return a < b ? 1.0f : 0.0f;
+    case 0x16D: return a <= b ? 1.0f : 0.0f;
+    case 0x16E: return (a != 0.0f && b != 0.0f) ? 1.0f : 0.0f;
+    case 0x16F: return (a != 0.0f || b != 0.0f) ? 1.0f : 0.0f;
+    case 0x171: return a == b ? 1.0f : 0.0f;
+    case 0x172: return a != b ? 1.0f : 0.0f;
+    default: return b;
+    }
+}
+
+/* The float compound assignments at 0x0045a11b, the same ten in the same
+ * order as the integer ones. */
+static float compound_float(int token, float a, float b)
+{
+    int32_t x = (int32_t) a, y = (int32_t) b;
+    switch (token) {
+    case 0x175: return a + b;
+    case 0x176: return a - b;
+    case 0x177: return a * b;
+    case 0x178: return a / b;
+    case 0x179: return (float) (x & y);
+    case 0x17A: return (float) (x | y);
+    case 0x17B: return y ? (float) (x % y) : 0.0f;
+    case 0x17C: return (float) (x ^ y);
+    case 0x17D: return (float) (int32_t) ((uint32_t) x << (y & 31));
+    case 0x17E: return (float) (x >> (y & 31));
     default: return b;
     }
 }
@@ -618,7 +781,69 @@ static int apply(cmvs_interp *in, nodes *st, int token, int32_t operand)
         st->n[st->count - 1].operand = v;
         return 1;
     }
-    node_push(st, token, operand);
+    node_push(st, token, operand, 0.0f);
+    return 1;
+}
+
+/*
+ * The same machine on floats, 0x00459ab0. The engine keeps two parsers rather
+ * than one because the two answer differently, not because they are shaped
+ * differently: every node here carries a float as well, an operator leaves its
+ * result as token 0x12A with the float in the node (0x00459bec), and the
+ * assignment goes through the float store.
+ */
+static int apply_float(cmvs_interp *in, nodes *st, int token, int32_t operand, float literal)
+{
+    if (token >= 0x160 && token <= 0x172 && token != 0x170) {
+        float a, b;
+        if (st->count < 2) return 0;
+        a = resolve_float(in, st->n[st->count - 2].token, st->n[st->count - 2].operand,
+                          st->n[st->count - 2].literal);
+        b = resolve_float(in, st->n[st->count - 1].token, st->n[st->count - 1].operand,
+                          st->n[st->count - 1].literal);
+        st->count--;
+        st->n[st->count - 1].token = 0x12A;
+        st->n[st->count - 1].literal = binary_float(token, a, b);
+        return 1;
+    }
+    if (token == 0x170) {
+        float v;
+        if (st->count < 2) return 0;
+        v = resolve_float(in, st->n[st->count - 1].token, st->n[st->count - 1].operand,
+                          st->n[st->count - 1].literal);
+        assign_float(in, st->n[st->count - 2].token, st->n[st->count - 2].operand, v);
+        st->count--;
+        st->n[st->count - 1].token = 0x12A;
+        st->n[st->count - 1].literal = v;
+        return 1;
+    }
+    if (token == 0x173 || token == 0x174) {
+        /* 0x0045a00b: the step is the 1.0 at 0x5477e0, not an integer one. */
+        float v;
+        if (st->count < 1) return 0;
+        v = resolve_float(in, st->n[st->count - 1].token, st->n[st->count - 1].operand,
+                          st->n[st->count - 1].literal);
+        v += token == 0x173 ? 1.0f : -1.0f;
+        assign_float(in, st->n[st->count - 1].token, st->n[st->count - 1].operand, v);
+        st->n[st->count - 1].token = 0x12A;
+        st->n[st->count - 1].literal = v;
+        return 1;
+    }
+    if (token >= 0x175 && token <= 0x17E) {
+        float a, b, v;
+        if (st->count < 2) return 0;
+        b = resolve_float(in, st->n[st->count - 1].token, st->n[st->count - 1].operand,
+                          st->n[st->count - 1].literal);
+        a = resolve_float(in, st->n[st->count - 2].token, st->n[st->count - 2].operand,
+                          st->n[st->count - 2].literal);
+        v = compound_float(token, a, b);
+        assign_float(in, st->n[st->count - 2].token, st->n[st->count - 2].operand, v);
+        st->count--;
+        st->n[st->count - 1].token = 0x12A;
+        st->n[st->count - 1].literal = v;
+        return 1;
+    }
+    node_push(st, token, operand, literal);
     return 1;
 }
 
@@ -630,7 +855,7 @@ static int apply(cmvs_interp *in, nodes *st, int token, int32_t operand)
  * the resolver alone would say these tokens mean nothing, because they never
  * reach it.
  */
-static int operand_base_token(int token)
+static int operand_base_token(int grammar, int token)
 {
     switch (token) {
     case 0x105: return 0x104;   /* 0x004593f6 */
@@ -639,7 +864,8 @@ static int operand_base_token(int token)
     case 0x111: return 0x107;   /* 0x004594a2 */
     case 0x112: return 0x10A;   /* 0x00459459 */
     case 0x113: return 0x10B;   /* 0x0045950b */
-    case 0x12A: return 0x100;   /* 0x00459512: a float literal, made an int */
+    /* 0x00459512 rounds it for the integer grammar; 0x0045a5a7 keeps it. */
+    case 0x12A: return grammar == CMVS_GRAMMAR_202 ? 0x12A : 0x100;
     case 0x12D: return 0x12C;   /* 0x00459552 */
     case 0x12F: return 0x12E;   /* 0x0045955c */
     case 0x134: return 0x130;   /* 0x0045a629, the float grammar's own */
@@ -657,21 +883,26 @@ static int operand_base_token(int token)
  * same row followed by a second index for the column.
  */
 static int read_operand(cmvs_interp *in, int grammar, int at, int depth,
-                        int *token_out, int32_t *operand_out, int *next)
+                        int *token_out, int32_t *operand_out, float *literal_out,
+                        int *next)
 {
     const cmvs_script *s = code(in);
     int token = word_at(in, at), len, nested;
     int32_t operand = 0, stride = 4;
+    float literal = 0.0f;
     if (token < 0) return 0;
     cmvs_token_shape((cmvs_grammar) grammar, token, &len, &nested);
     if (len >= 6) operand = dword_at(in, at + 2);
     if (len >= 8) stride = word_at(in, at + 6);
     if (token == 0x12A) {
-        /* 0x00459512 loads the operand as a float and rounds it. */
-        float f;
-        uint32_t bits = (uint32_t) operand;
-        memcpy(&f, &bits, sizeof f);
-        operand = (int32_t) f;
+        /*
+         * The same four bytes read two ways. 0x00459512 loads them as a float
+         * and rounds; 0x0045a5a7 fld's them into the node and leaves them
+         * alone, which is the only float a script can spell out.
+         */
+        float f = as_float(operand);
+        if (grammar == CMVS_GRAMMAR_202) literal = f;
+        else operand = (int32_t) f;
     }
     at += len;
     if (nested) {
@@ -694,8 +925,9 @@ static int read_operand(cmvs_interp *in, int grammar, int at, int depth,
             }
         }
     }
-    *token_out = operand_base_token(token);
+    *token_out = operand_base_token(grammar, token);
     *operand_out = operand;
+    *literal_out = literal;
     *next = at;
     return 1;
 }
@@ -712,13 +944,21 @@ static int run_tokens(cmvs_interp *in, int grammar, int at, int depth, nodes *st
             if (!eval_expression(in, CMVS_GRAMMAR_200, at + 2, depth + 1, &v)) return 0;
             next = cmvs_expression_end(code(in), CMVS_GRAMMAR_200, at + 2);
             if (next < 0) return 0;
-            node_push(st, 0x100, v);
+            node_push(st, 0x100, v, 0.0f);
             at = next;
             continue;
         }
-        if (!read_operand(in, grammar, at, depth, &token, &operand, &next)) return 0;
-        at = next;
-        if (!apply(in, st, token, operand)) return 0;
+        {
+            float literal = 0.0f;
+            if (!read_operand(in, grammar, at, depth, &token, &operand, &literal, &next))
+                return 0;
+            at = next;
+            if (grammar == CMVS_GRAMMAR_202) {
+                if (!apply_float(in, st, token, operand, literal)) return 0;
+            } else {
+                if (!apply(in, st, token, operand)) return 0;
+            }
+        }
     }
 }
 
@@ -797,6 +1037,23 @@ static int eval_expression(cmvs_interp *in, int grammar, int at, int depth, int3
     if (!run_tokens(in, grammar, at, depth, &st, &end)) return 0;
     *result = st.count > 0
             ? resolve(in, st.n[st.count - 1].token, st.n[st.count - 1].operand) : 0;
+    return 1;
+}
+
+/*
+ * The float statement's answer is the FIRST node's, not the last: the epilogue
+ * at 0x0045a710 resolves the array's base entry and `fst`s it straight into the
+ * accumulator, then sets the condition flag from a comparison against zero.
+ */
+static int eval_float_expression(cmvs_interp *in, int at, int depth, float *result)
+{
+    nodes st;
+    int end = 0;
+    if (depth > 32) return 0;
+    st.count = 0;
+    if (!run_tokens(in, CMVS_GRAMMAR_202, at, depth, &st, &end)) return 0;
+    *result = st.count > 0
+            ? resolve_float(in, st.n[0].token, st.n[0].operand, st.n[0].literal) : 0.0f;
     return 1;
 }
 
@@ -1616,16 +1873,35 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
             in->pc = end;
             continue;
         }
-        if (op == 0x0200 || op == 0x0202) {
-            int grammar = op == 0x0200 ? CMVS_GRAMMAR_200 : CMVS_GRAMMAR_202;
+        if (op == 0x0200) {
             int32_t v = 0;
-            int end = cmvs_expression_end(code(in), grammar, in->pc + 2);
-            if (end < 0 || !eval_expression(in, grammar, in->pc + 2, 0, &v)) {
+            int end = cmvs_expression_end(code(in), CMVS_GRAMMAR_200, in->pc + 2);
+            if (end < 0 || !eval_expression(in, CMVS_GRAMMAR_200, in->pc + 2, 0, &v)) {
                 fail(err, errlen, "an expression the interpreter could not evaluate");
                 return -1;
             }
             in->acc = v;
             in->flag = v != 0;
+            in->pc = end;
+            continue;
+        }
+        if (op == 0x0202) {
+            /*
+             * The accumulator holds the BIT PATTERN of the float, because
+             * 0x0045a73b stores it with `fst` and not through a rounding. That
+             * is how a command whose handler does `fld dword ptr [ecx-0xc]` -
+             * the whole 0x070..0x074 family - receives a real float over a
+             * stack of dwords. Evaluating this statement as integer arithmetic
+             * handed those handlers a denormal instead.
+             */
+            float v = 0.0f;
+            int end = cmvs_expression_end(code(in), CMVS_GRAMMAR_202, in->pc + 2);
+            if (end < 0 || !eval_float_expression(in, in->pc + 2, 0, &v)) {
+                fail(err, errlen, "a float expression the interpreter could not evaluate");
+                return -1;
+            }
+            in->acc = as_bits(v);
+            in->flag = v != 0.0f;
             in->pc = end;
             continue;
         }
