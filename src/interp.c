@@ -1212,6 +1212,10 @@ static int command_builtin(cmvs_interp *in, int command)
         in->sys[0] = cmvs_scene_exists(in->scene, arg(in, 2, 1), arg(in, 2, 0));
         in->command_known[command] = 1;
         return 0;
+    case 0x023:   /* 0x0045ea90 -> 0x00432c40: and that one part is gone */
+        cmvs_scene_drop(in->scene, arg(in, 2, 1), arg(in, 2, 0));
+        in->command_known[command] = 1;
+        return 0;
     case 0x022:   /* 0x00433cb0: a fresh part, an object of the same class */
         in->command_known[command] =
             cmvs_scene_part(in->scene, arg(in, 2, 1), arg(in, 2, 0));
