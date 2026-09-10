@@ -112,17 +112,27 @@ static void close_sound(void)
 
 JNIEXPORT jlong JNICALL
 Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeOpen(JNIEnv *env, jclass klass,
-                                                      jstring folder, jstring script)
+                                                      jstring folder, jstring script,
+                                                      jstring saves)
 {
-    const char *folder_release = NULL, *script_release = NULL;
+    const char *folder_release = NULL, *script_release = NULL, *saves_release = NULL;
     const char *folder_text = java_string(env, folder, &folder_release);
     const char *script_text = java_string(env, script, &script_release);
+    /*
+     * The host's own folder for this game's saves. The engine puts the game's
+     * real CSV2 and CSS1 files in the subfolder the boot script names inside
+     * it, so what is written here is what the Windows game writes; with no
+     * folder the engine saves nothing rather than writing into the game.
+     */
+    const char *saves_text = java_string(env, saves, &saves_release);
     cmvs_session *session;
 
     last_error[0] = 0;
-    session = cmvs_session_open(folder_text, script_text, NULL, last_error, sizeof last_error);
+    session = cmvs_session_open(folder_text, script_text, NULL, saves_text,
+                                last_error, sizeof last_error);
     if (folder_release) (*env)->ReleaseStringUTFChars(env, folder, folder_release);
     if (script_release) (*env)->ReleaseStringUTFChars(env, script, script_release);
+    if (saves_release) (*env)->ReleaseStringUTFChars(env, saves, saves_release);
     if (session == NULL) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", last_error);
         return 0;
@@ -132,6 +142,39 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeOpen(JNIEnv *env, jclass klass,
                         cmvs_session_script(session));
     open_sound(session);
     return (jlong) (intptr_t) session;
+}
+
+/*
+ * KEY_FUNCTION 13 and 14: quick save and quick load, on slot 999. They answer
+ * with the reason when they fail rather than silently doing nothing, because on
+ * a console a save that did not happen looks exactly like one that did.
+ */
+JNIEXPORT jstring JNICALL
+Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeQuickSave(JNIEnv *env, jclass klass,
+                                                           jlong handle)
+{
+    cmvs_session *session = (cmvs_session *) (intptr_t) handle;
+    char err[256] = {0};
+    if (cmvs_session_quick_save(session, err, sizeof err)) return NULL;
+    return (*env)->NewStringUTF(env, err[0] ? err : "the quick save did not happen");
+}
+
+JNIEXPORT jstring JNICALL
+Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeQuickLoad(JNIEnv *env, jclass klass,
+                                                           jlong handle)
+{
+    cmvs_session *session = (cmvs_session *) (intptr_t) handle;
+    char err[256] = {0};
+    if (cmvs_session_quick_load(session, err, sizeof err)) return NULL;
+    return (*env)->NewStringUTF(env, err[0] ? err : "there is no quick save");
+}
+
+JNIEXPORT jstring JNICALL
+Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeSaveFolder(JNIEnv *env, jclass klass,
+                                                            jlong handle)
+{
+    const char *folder = cmvs_session_save_folder((cmvs_session *) (intptr_t) handle);
+    return folder ? (*env)->NewStringUTF(env, folder) : NULL;
 }
 
 JNIEXPORT jstring JNICALL

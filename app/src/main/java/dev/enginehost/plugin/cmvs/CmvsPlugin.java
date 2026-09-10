@@ -65,7 +65,12 @@ public final class CmvsPlugin implements EnginePlugin {
         // execFile names the boot script when a game does not use the usual one.
         // The engine falls back to start.ps3, which every CMVS game ships loose
         // beside its archives, so an empty execFile is the normal case.
-        engine = nativeOpen(session.gamePath(), session.execFile());
+        // The saves are the GAME's own files - byte-compatible CSV2 slots and
+        // a CSS1 system file, under the names the Windows game uses - written
+        // in the folder the host keeps for this game. Nothing is ever written
+        // into the game folder, and with no folder the engine saves nothing.
+        engine = nativeOpen(session.gamePath(), session.execFile(),
+                            session.host().saveDirectory().getAbsolutePath());
         if (engine == 0) throw new IOException(nativeError());
         view = new ScreenView();
         session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
@@ -118,6 +123,16 @@ public final class CmvsPlugin implements EnginePlugin {
             case "cancel":
                 nativeButton(engine, 1, event.pressed());
                 return true;
+            // KEY_FUNCTION 13 and 14 in the engine's own action list. The
+            // engine ships no pad binding for either (its factory defaults are
+            // F1 and F2), so which control sends these is the host's mapping to
+            // make; the plugin only carries them through.
+            case "quicksave":
+                if (event.pressed()) quick(true);
+                return true;
+            case "quickload":
+                if (event.pressed()) quick(false);
+                return true;
             case "left_x":
                 stickX = step(stickX, event.value());
                 return true;
@@ -126,6 +141,23 @@ public final class CmvsPlugin implements EnginePlugin {
                 return true;
             default:
                 return false;
+        }
+    }
+
+    /**
+     * Quick save and quick load, on the same slot 999 file the Windows game
+     * uses. The result goes in the log either way: on a console a save that did
+     * not happen and one that did look identical on screen.
+     */
+    private void quick(boolean saving) {
+        if (engine == 0) return;
+        String why = saving ? nativeQuickSave(engine) : nativeQuickLoad(engine);
+        if (why == null) {
+            session.host().log(Log.INFO, "cmvs",
+                    (saving ? "quick save written to " : "quick save loaded from ")
+                            + nativeSaveFolder(engine), null);
+        } else {
+            session.host().log(Log.WARN, "cmvs", why, null);
         }
     }
 
@@ -287,7 +319,10 @@ public final class CmvsPlugin implements EnginePlugin {
         }
     }
 
-    private static native long nativeOpen(String folder, String script);
+    private static native long nativeOpen(String folder, String script, String saves);
+    private static native String nativeQuickSave(long engine);
+    private static native String nativeQuickLoad(long engine);
+    private static native String nativeSaveFolder(long engine);
     private static native String nativeError();
     private static native void nativeClose(long engine);
     private static native int nativeWidth(long engine);

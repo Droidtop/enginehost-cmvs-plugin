@@ -15,10 +15,20 @@
 
 typedef struct cmvs_session cmvs_session;
 
-/* Opens the game folder and boots `script`, or "start.ps3" when it is NULL -
- * the boot script every CMVS game ships loose beside its archives. */
+/*
+ * Opens the game folder and boots `script`, or "start.ps3" when it is NULL -
+ * the boot script every CMVS game ships loose beside its archives.
+ *
+ * `saves` is the folder the HOST keeps this game's saves in. The boot script
+ * names a subfolder inside it (command 0x016) and the files written there are
+ * the game's own: byte-compatible CSV2 slots and a CSS1 system file, under the
+ * names the Windows game uses, so a slot copies either way. Pass NULL and the
+ * engine has no save folder at all - it says so and saves nothing. It never
+ * writes into the game folder.
+ */
 cmvs_session *cmvs_session_open(const char *folder, const char *script,
-                                const char *font, char *err, size_t errlen);
+                                const char *font, const char *saves,
+                                char *err, size_t errlen);
 void cmvs_session_close(cmvs_session *s);
 
 int cmvs_session_width(const cmvs_session *s);
@@ -71,6 +81,31 @@ int cmvs_session_drawn(const cmvs_session *s);
  * separates "the tap never reached the engine" from "the menu saw it".
  */
 int cmvs_session_menu_events(const cmvs_session *s, int *last_item);
+
+/*
+ * KEY_FUNCTION 13 and 14, quick save and quick load. They are the engine's own
+ * named actions (see coordination agents/cmvs/KEY-FUNCTIONS.md) and they act on
+ * slot 999, which is what the original calls the quick slot - the same file the
+ * Windows game's QUICK SAVE writes. Both answer 0 with a reason when there is
+ * no save folder or no such slot.
+ *
+ * The other three of that group - 15 popup menu, 19 save screen, 20 load screen
+ * - are not here: in the original they are polled by the SCRIPT, through the
+ * accessors at 0x00448B20, and the command that does that polling is not
+ * implemented yet. There is nothing for the engine itself to do with them.
+ */
+int cmvs_session_quick_save(cmvs_session *s, char *err, size_t errlen);
+int cmvs_session_quick_load(cmvs_session *s, char *err, size_t errlen);
+
+/* Any slot; the two above are this on slot 999. The Data Save and Data Load
+ * screens reach these through the script, by way of commands 0x2b6 and
+ * 0x2b5. */
+int cmvs_session_save_slot(cmvs_session *s, int slot, char *err, size_t errlen);
+int cmvs_session_load_slot(cmvs_session *s, int slot, char *err, size_t errlen);
+
+/* The folder the saves are actually being kept in, once the boot script has
+ * named it, or NULL. A console run's log needs this to be readable. */
+const char *cmvs_session_save_folder(const cmvs_session *s);
 
 /* Development handles: statement tracing and the command report. */
 void cmvs_session_trace(cmvs_session *s, int on);

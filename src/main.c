@@ -569,7 +569,7 @@ static int run_window(cmvs_session *s, const run_options *o)
 static int cmd_run(const char *folder, const run_options *o)
 {
     char err[256] = {0};
-    cmvs_session *s = cmvs_session_open(folder, o->script, o->font, err, sizeof err);
+    cmvs_session *s = cmvs_session_open(folder, o->script, o->font, NULL, err, sizeof err);
     int rc;
 
     if (!s) { fprintf(stderr, "%s\n", err); return 1; }

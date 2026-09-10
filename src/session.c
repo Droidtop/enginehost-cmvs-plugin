@@ -59,7 +59,8 @@ static void open_font(cmvs_session *s, const char *override)
 }
 
 cmvs_session *cmvs_session_open(const char *folder, const char *script,
-                                const char *font, char *err, size_t errlen)
+                                const char *font, const char *saves,
+                                char *err, size_t errlen)
 {
     cmvs_session *s = calloc(1, sizeof *s);
     if (!s) {
@@ -76,6 +77,9 @@ cmvs_session *cmvs_session_open(const char *folder, const char *script,
         free(s);
         return NULL;
     }
+    /* Before the boot script runs: start.ps3's command 0x016 is what turns
+     * this into the game's own save folder, and it runs in the first frames. */
+    cmvs_interp_save_base(s->interp, saves);
     if (!cmvs_interp_boot(s->interp,
                           script && *script ? script : cmvs_game_boot_script(s->game),
                           err, errlen)) {
@@ -162,6 +166,41 @@ long cmvs_session_statements(const cmvs_session *s)
 int cmvs_session_drawn(const cmvs_session *s)
 {
     return s ? cmvs_scene_drawn(cmvs_interp_scene(s->interp)) : 0;
+}
+
+/* The quick slot is 0x3e7 - 999 - which is the file the Windows game's QUICK
+ * SAVE writes and the one its QUICK LOAD reads. */
+#define QUICK_SLOT 999
+
+int cmvs_session_save_slot(cmvs_session *s, int slot, char *err, size_t errlen)
+{
+    if (!s) return 0;
+    return cmvs_interp_save_slot(s->interp, slot, err, errlen);
+}
+
+int cmvs_session_load_slot(cmvs_session *s, int slot, char *err, size_t errlen)
+{
+    if (!s) return 0;
+    if (!cmvs_interp_load_slot(s->interp, slot, err, errlen)) return 0;
+    /* A game that had run off its end is running again: what the file carries
+     * is a live state. */
+    s->alive = 1;
+    return 1;
+}
+
+int cmvs_session_quick_save(cmvs_session *s, char *err, size_t errlen)
+{
+    return cmvs_session_save_slot(s, QUICK_SLOT, err, errlen);
+}
+
+int cmvs_session_quick_load(cmvs_session *s, char *err, size_t errlen)
+{
+    return cmvs_session_load_slot(s, QUICK_SLOT, err, errlen);
+}
+
+const char *cmvs_session_save_folder(const cmvs_session *s)
+{
+    return s ? cmvs_interp_save_folder(s->interp) : NULL;
 }
 
 void cmvs_session_trace(cmvs_session *s, int on) { if (s) cmvs_interp_trace(s->interp, on); }
