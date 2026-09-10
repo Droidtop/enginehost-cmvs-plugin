@@ -1,17 +1,26 @@
 /*
- * The pointer and the buttons, the way the engine's input device holds them.
+ * The pointer and the engine's key functions, the way its input device holds them.
  *
- * Everything here was read off the accessors the menu poll calls on the object
- * at +0xcb8 (0x00448B20 onwards). The device keeps, for each button, a HELD
- * level and two EDGES - one for the press and one for the release - and the
- * reader clears the edges once it has acted on them:
+ * These are not buttons. CMVS resolves every input through a table of 24 NAMED
+ * FUNCTIONS, each with five alternative bindings read out of key.cfg's
+ * [KEY_FUNCTION_01..24] (loader 0x0044CCD0, table at +0x31c, resolver
+ * 0x00449020). A function's three flags live at +0x430 + 12*n:
  *
- *   +0x43c  left released    +0x440  left held      +0x444  left pressed
- *   +0x448  right released   +0x44c  right held     +0x450  right pressed
- *   +0x454  up pressed       +0x458  up held
- *   +0x460  down pressed     +0x464  down held
- *   0x00448B50 clears the two left edges, 0x00448B90 the right ones,
- *   0x00448C20 the up edge, 0x00448C50 the down edge.
+ *   n=1  +0x43c/+0x440/+0x444   KEY_FUNCTION_01  Confirm     (default left click, pad 1, Enter)
+ *   n=2  +0x448/+0x44c/+0x450   KEY_FUNCTION_02  Cancel      (default right click, pad 2, Escape)
+ *   n=3  +0x454/+0x458/+0x45c   KEY_FUNCTION_03  Cursor up   (default Up, pad up)
+ *   n=4  +0x460/+0x464/+0x468   KEY_FUNCTION_04  Cursor down (default Down, pad down)
+ *
+ * in each triple: +0 RELEASED edge, +4 HELD level, +8 PRESSED edge. The
+ * accessors the menu poll calls on the object at +0xcb8 start at 0x00448B20 and
+ * run one pair per function in KEY_FUNCTION order; 0x00448B50 clears function
+ * 01's two edges, 0x00448B90 function 02's, 0x00448C20 function 03's,
+ * 0x00448C50 function 04's. That is why a tap and a pad press are the same
+ * thing here: the original never distinguishes them either.
+ *
+ * The full 24-function table, its evidence and the 128-entry input-code space
+ * are in coordination agents/cmvs/KEY-FUNCTIONS.md. Only these four are
+ * implemented, because only these four have anything to act on yet.
  *
  * The pointer is in ENGINE coordinates - the game's own screen, 1280x720 for
  * ChronoClock - not in the window's. The original scales between the two
@@ -27,9 +36,9 @@ typedef struct {
     int x, y;                  /* the pointer, in engine coordinates */
     int have_pointer;          /* nothing has pointed at the screen yet */
 
-    int left_held, left_pressed, left_released;
-    int right_held, right_pressed, right_released;
-    int up_pressed, down_pressed;
+    int confirm_held, confirm_pressed, confirm_released;
+    int cancel_held, cancel_pressed, cancel_released;
+    int cursor_up_pressed, cursor_down_pressed;
 } cmvs_input;
 
 /* What a frontend calls. `button` is 0 for the left button (a tap, confirm)
