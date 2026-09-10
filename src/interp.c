@@ -1620,8 +1620,8 @@ static int command_builtin(cmvs_interp *in, int command)
      * them here a tap never advanced the scene.
      */
     case 0x1A0:     /* 0x00468a00 -> 0x00448b20: the left button, +0x43c */
-        in->sys[0] = in->input.left_released ? 1 : 0;
-        in->sys[4] = in->input.left_held ? 1 : 0;
+        in->sys[0] = in->input.confirm_released ? 1 : 0;
+        in->sys[4] = in->input.confirm_held ? 1 : 0;
         in->command_known[command] = 1;
         return 0;
     case 0x34A:
@@ -1661,13 +1661,13 @@ static int command_builtin(cmvs_interp *in, int command)
          * window's own buttons through the hit test at 0x00452a80.
          */
         cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
-        int click = in->input.left_pressed;
+        int click = in->input.confirm_pressed;
         if (click) {
             /* 0x00448B50, which is what the original calls the moment it has
              * acted on the press. Leaving the edge latched would spend one
              * click on every wait between here and the next frame. */
-            in->input.left_pressed = 0;
-            in->input.left_released = 0;
+            in->input.confirm_pressed = 0;
+            in->input.confirm_released = 0;
         }
         in->command_known[command] = 1;
         if (t && cmvs_text_revealing(t)) {

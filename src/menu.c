@@ -203,13 +203,13 @@ int cmvs_menu_poll(cmvs_menus *m, int menu, cmvs_input *in, cmvs_scene *scene)
      * end, and then WARPS THE POINTER to the middle of what it selected. The
      * original does it with SetCursorPos so that the hit test below - the only
      * thing that actually decides what is selected - agrees with the pad. */
-    if (in->up_pressed) {
-        in->up_pressed = 0;
+    if (in->cursor_up_pressed) {
+        in->cursor_up_pressed = 0;
         if (mm->current && mm->current->prev_id >= 0) hit = find(mm, mm->current->prev_id);
         else hit = last(mm);
     }
-    if (in->down_pressed) {
-        in->down_pressed = 0;
+    if (in->cursor_down_pressed) {
+        in->cursor_down_pressed = 0;
         if (mm->current && mm->current->next_id >= 0) hit = find(mm, mm->current->next_id);
         else hit = mm->head;
     }
@@ -233,16 +233,16 @@ int cmvs_menu_poll(cmvs_menus *m, int menu, cmvs_input *in, cmvs_scene *scene)
         mm->current = hit;
     }
 
-    if (in->left_pressed) mm->press_from = mm->current;
-    if (in->left_released) {
-        in->left_released = 0;
-        in->left_pressed = 0;
+    if (in->confirm_pressed) mm->press_from = mm->current;
+    if (in->confirm_released) {
+        in->confirm_released = 0;
+        in->confirm_pressed = 0;
         /* A click counts only where it began: press START, drag off it and let
          * go and the game is told so rather than started. */
         if (mm->current && mm->current == mm->press_from) return mm->current->id;
         return CMVS_MENU_ELSEWHERE;
     }
-    if (!in->left_held) {
+    if (!in->confirm_held) {
         mm->press_from = NULL;
         if (mm->pressed) {
             if (mm->current) wear(scene, mm->object, &mm->current->state[1]);
@@ -253,9 +253,9 @@ int cmvs_menu_poll(cmvs_menus *m, int menu, cmvs_input *in, cmvs_scene *scene)
         mm->pressed = 1;
     }
 
-    if (in->right_released) {
-        in->right_released = 0;
-        in->right_pressed = 0;
+    if (in->cancel_released) {
+        in->cancel_released = 0;
+        in->cancel_pressed = 0;
         return CMVS_MENU_CANCEL;
     }
     return CMVS_MENU_NONE;
