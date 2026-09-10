@@ -30,13 +30,17 @@ GAMES ?= $(wildcard /root/re/chronoclock)
 CC       := gcc
 CSTD     := -std=c11
 WARN     := -Wall -Wextra -Wno-unused-parameter
-CFLAGS   := $(CSTD) $(WARN) -O2 -g -I$(SRCDIR) -Ithird_party $(shell sdl2-config --cflags)
+# -MMD -MP writes a .d beside every .o naming the headers it read, so editing
+# a header rebuilds what included it. Without it a struct can grow in a header
+# and half the objects keep the old layout, which is a whole evening.
+DEPFLAGS := -MMD -MP
+CFLAGS   := $(CSTD) $(WARN) -O2 -g $(DEPFLAGS) -I$(SRCDIR) -Ithird_party $(shell sdl2-config --cflags)
 LDFLAGS  := $(shell sdl2-config --libs) -lm -lz
 
 # make DEBUG=1 turns on the sanitizers, which is how the format code gets its
 # bounds checks exercised against real game data.
 ifdef DEBUG
-CFLAGS  := $(CSTD) $(WARN) -O0 -g -fsanitize=address,undefined -I$(SRCDIR) -Ithird_party $(shell sdl2-config --cflags)
+CFLAGS  := $(CSTD) $(WARN) -O0 -g -fsanitize=address,undefined $(DEPFLAGS) -I$(SRCDIR) -Ithird_party $(shell sdl2-config --cflags)
 LDFLAGS := -fsanitize=address,undefined $(shell sdl2-config --libs) -lm -lz
 endif
 
@@ -65,4 +69,6 @@ run: all
 	$(BUILDDIR)/$(TARGET) $(GAME)
 
 clean:
-	rm -f $(BUILDDIR)/*.o $(BUILDDIR)/$(TARGET)
+	rm -f $(BUILDDIR)/*.o $(BUILDDIR)/*.d $(BUILDDIR)/$(TARGET)
+
+-include $(OBJECTS:.o=.d)
