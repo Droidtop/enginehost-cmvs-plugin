@@ -414,6 +414,136 @@ static void test_state(const char *dir, const char *game)
     free(reference);
 }
 
+/*
+ * A save of ours from a DIFFERENT point in the story.
+ *
+ * The round trip above proves our writer's bytes; it cannot prove that a save
+ * of ours carries a state the game has never been in, because it re-saves the
+ * state it just read. This does: it loads the user's save000.dat, reads on
+ * through the scene the way a player does - one confirm per frame, which is
+ * deterministic where a timed reveal is not - and saves where it stops.
+ *
+ * The stopping place is named by its LINE, not by its pc: after seven answered
+ * message waits the engine is resting in the eighth line's wait, and the line
+ * on screen is the text this prints. That text is what a person can check on
+ * the Windows game after loading the same file.
+ *
+ * The thumbnail is the frame the engine actually has at that moment, so it is
+ * also the check that the picture is a scene and not a blank: a save whose
+ * thumbnail is one flat colour is the bug the Windows LOAD screen showed as an
+ * empty slot.
+ */
+#define ADVANCE_LINES 7
+
+static int distinct_colours(const uint8_t *bmp, int size)
+{
+    /* A coarse count: the low five bits of each channel, so a gradient does
+     * not read as thousands of colours and a flat fill cannot read as more
+     * than one. */
+    static uint8_t seen[1 << 15];
+    int i, n = 0;
+    memset(seen, 0, sizeof seen);
+    for (i = 54; i + 3 <= size; i += 3) {
+        unsigned k = (unsigned) ((bmp[i] >> 3) << 10 | (bmp[i + 1] >> 3) << 5
+                                 | (bmp[i + 2] >> 3));
+        if (!seen[k]) { seen[k] = 1; n++; }
+    }
+    return n;
+}
+
+static void test_advance(const char *dir, const char *game)
+{
+    char err[256] = {0}, path[1024], saves[1024], line[4096];
+    cmvs_session *s;
+    uint8_t *reference, *file;
+    int reference_size = 0, size = 0, i, colours;
+    cmvs_save ours, theirs;
+    cmvs_record *a, *b;
+
+    printf("a save of our own from further on, in %s\n", game);
+    snprintf(saves, sizeof saves, "%s/cmvs-save-test", game_scratch());
+    s = cmvs_session_open(game, NULL, NULL, saves, err, sizeof err);
+    if (!s) { printf("  --    %s\n", err); return; }
+
+    for (i = 0; i < 400 && !cmvs_session_save_folder(s); i++)
+        cmvs_session_frame(s, err, sizeof err);
+    if (!cmvs_session_save_folder(s)) { cmvs_session_close(s); return; }
+
+    reference = slurp_from(dir, "save000.dat", &reference_size);
+    if (!reference) { cmvs_session_close(s); return; }
+    snprintf(path, sizeof path, "%s/save000.dat", cmvs_session_save_folder(s));
+    if (!write_out(path, reference, reference_size)) {
+        free(reference); cmvs_session_close(s); return;
+    }
+    if (!cmvs_session_load_slot(s, 0, err, sizeof err)) {
+        check(0, "the engine loads the user's save000.dat");
+        free(reference); cmvs_session_close(s); return;
+    }
+
+    /* One frame, so the wait the save resumes into runs once and says which
+     * layer the line is on; before that the engine has no line yet. */
+    cmvs_session_frame(s, err, sizeof err);
+    cmvs_session_message(s, line, sizeof line);
+    check(strstr(line, "standing on the rooftop") != NULL,
+          "the loaded save is resting on the line the user saved on");
+
+    /*
+     * One confirm per frame. A press finishes a still-revealing line and a
+     * press on a finished line ends its wait (command 0x153), so two frames
+     * carry one line however fast the reveal is set - the run lands in the
+     * same place every time, which a run that waited on the typewriter would
+     * not.
+     */
+    for (i = 0; i < 400 && cmvs_session_messages(s) < ADVANCE_LINES; i++) {
+        cmvs_session_frame(s, err, sizeof err);
+        cmvs_session_button(s, 0, 1);
+        cmvs_session_button(s, 0, 0);
+    }
+    check(cmvs_session_messages(s) == ADVANCE_LINES,
+          "seven message lines are read past");
+
+    /* A few frames with nobody pressing anything, so the line that is now on
+     * screen is composed whole before its picture is taken. */
+    for (i = 0; i < 5; i++) cmvs_session_frame(s, err, sizeof err);
+
+    cmvs_session_message(s, line, sizeof line);
+    printf("        the line it stopped on: %s\n", line);
+    check(line[0] != 0, "and there is a line on screen to name the place by");
+
+    check(cmvs_session_save_slot(s, 3, err, sizeof err),
+          "the engine writes slot 3 (save003.dat, the LOAD screen's slot 4)");
+    snprintf(path, sizeof path, "%s/save003.dat", cmvs_session_save_folder(s));
+    printf("        %s\n", path);
+    cmvs_session_close(s);
+
+    file = slurp(path, &size);
+    if (!file) { check(0, "save003.dat is on disk"); free(reference); return; }
+    if (!cmvs_save_read(file, size, &ours, err, sizeof err)
+        || !cmvs_save_read(reference, reference_size, &theirs, err, sizeof err)) {
+        printf("  %s\n", err);
+        check(0, "the save reads back");
+        free(file); free(reference); return;
+    }
+
+    check(ours.thumb && ours.thumb_size == 54 + 192 * 108 * 3
+          && ours.thumb[0] == 'B' && ours.thumb[1] == 'M',
+          "it carries a 192x108 BMP thumbnail");
+    colours = ours.thumb ? distinct_colours(ours.thumb, ours.thumb_size) : 0;
+    printf("        the thumbnail holds %d colours\n", colours);
+    check(colours > 64, "and the thumbnail is a picture, not a flat fill");
+
+    a = cmvs_save_find(&theirs, 0x107, 0);
+    b = cmvs_save_find(&ours, 0x107, 0);
+    check(a && b && a->len == 4 && b->len == 4
+          && memcmp(a->data, b->data, 4) != 0,
+          "the resume point is NOT where the user's save000.dat resumes");
+
+    cmvs_save_free(&ours);
+    cmvs_save_free(&theirs);
+    free(file);
+    free(reference);
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : NULL;
@@ -429,7 +559,7 @@ int main(int argc, char **argv)
     } else {
         printf("no reference saves given; the container tests need real files\n");
     }
-    if (dir && game) test_state(dir, game);
+    if (dir && game) { test_state(dir, game); test_advance(dir, game); }
     else printf("no game to save from; the engine round trip needs one\n");
 
     printf("\n%d checks, %d failed\n", checks, failures);

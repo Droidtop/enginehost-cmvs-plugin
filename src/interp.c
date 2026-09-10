@@ -79,6 +79,16 @@ struct cmvs_interp {
     int menu_last;
 
     /*
+     * The line the reader is on: how many message waits (command 0x153) have
+     * been answered, and which layer's text object the last one was resting on.
+     * Where the script is by pc is a number nobody can read; the line it is
+     * waiting on is the position a person recognises, which is what a log, and
+     * a save made at a known point, are identified by.
+     */
+    long messages;
+    int message_layer;
+
+    /*
      * The 64 registered procedures at +0x33c8, 0x1c bytes apiece. Command
      * 0x088 puts the current script and a label into one of them and command
      * 0x08a calls it: this is how a script hands the engine a piece of itself
@@ -138,6 +148,7 @@ cmvs_interp *cmvs_interp_new(cmvs_game *game)
 {
     cmvs_interp *in = calloc(1, sizeof *in);
     if (!in) return NULL;
+    in->message_layer = -1;     /* no line yet, which is not the same as layer 0 */
     in->game = game;
     in->current = -1;
     in->frame_ms = 16;
@@ -179,6 +190,49 @@ int cmvs_interp_menu_events(const cmvs_interp *in, int *last_item)
 }
 
 long cmvs_interp_statements(const cmvs_interp *in) { return in->statements; }
+
+long cmvs_interp_messages(const cmvs_interp *in) { return in ? in->messages : 0; }
+
+/*
+ * The line as text. The glyphs the message layer holds ARE the line - command
+ * 0x152 laid them out one by one - so reading them back in order gives the
+ * words on screen, in UTF-8 because that is what anything outside the engine
+ * reads. Escapes cost no glyph and so do not appear here.
+ */
+int cmvs_interp_message(const cmvs_interp *in, char *out, size_t outlen)
+{
+    const cmvs_text *t;
+    size_t at = 0;
+    int i;
+
+    if (!out || !outlen) return 0;
+    out[0] = 0;
+    if (!in || in->message_layer < 0) return 0;
+    t = cmvs_scene_text(in->scene, in->message_layer);
+    if (!t) return 0;
+
+    for (i = 0; i < t->glyphs; i++) {
+        unsigned c = t->glyph[i].code;
+        char buf[4];
+        int n;
+        if (c < 0x80) { buf[0] = (char) c; n = 1; }
+        else if (c < 0x800) {
+            buf[0] = (char) (0xC0 | (c >> 6));
+            buf[1] = (char) (0x80 | (c & 0x3F));
+            n = 2;
+        } else {
+            buf[0] = (char) (0xE0 | (c >> 12));
+            buf[1] = (char) (0x80 | ((c >> 6) & 0x3F));
+            buf[2] = (char) (0x80 | (c & 0x3F));
+            n = 3;
+        }
+        if (at + (size_t) n + 1 > outlen) break;
+        memcpy(out + at, buf, (size_t) n);
+        at += (size_t) n;
+    }
+    out[at] = 0;
+    return (int) at;
+}
 
 static const cmvs_script *code(const cmvs_interp *in)
 {
@@ -1686,6 +1740,7 @@ static int command_builtin(cmvs_interp *in, int command)
          */
         cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
         int click = in->input.confirm_pressed;
+        in->message_layer = arg(in, 3, 2);
         if (click) {
             /* 0x00448B50, which is what the original calls the moment it has
              * acted on the press. Leaving the edge latched would spend one
@@ -1699,6 +1754,7 @@ static int command_builtin(cmvs_interp *in, int command)
             return CMVS_CMD_OWN | CMVS_CMD_REPEAT | CMVS_CMD_STOP;
         }
         if (!click) return CMVS_CMD_OWN | CMVS_CMD_REPEAT | CMVS_CMD_STOP;
+        in->messages++;
         return CMVS_CMD_OWN | CMVS_CMD_ADVANCE | 0x0C;
     }
     case 0x155: { /* 0x00466b00 -> 0x004505b0: the edge colour */

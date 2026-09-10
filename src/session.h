@@ -73,6 +73,15 @@ void cmvs_session_audio_open(cmvs_session *s, int rate);
 /* What is running, for a status line or a log. */
 const char *cmvs_session_script(const cmvs_session *s);
 long cmvs_session_statements(const cmvs_session *s);
+
+/*
+ * Where in the story the run is: how many message lines have been read past,
+ * and the line on screen now, as UTF-8. A save is identified to a person by
+ * its line, not by its pc, and this is what lets a run say which line it
+ * stopped on.
+ */
+long cmvs_session_messages(const cmvs_session *s);
+int cmvs_session_message(const cmvs_session *s, char *out, size_t outlen);
 int cmvs_session_drawn(const cmvs_session *s);
 
 /*

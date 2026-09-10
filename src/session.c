@@ -163,6 +163,20 @@ long cmvs_session_statements(const cmvs_session *s)
     return s ? cmvs_interp_statements(s->interp) : 0;
 }
 
+long cmvs_session_messages(const cmvs_session *s)
+{
+    return s ? cmvs_interp_messages(s->interp) : 0;
+}
+
+int cmvs_session_message(const cmvs_session *s, char *out, size_t outlen)
+{
+    if (!s) {
+        if (out && outlen) out[0] = 0;
+        return 0;
+    }
+    return cmvs_interp_message(s->interp, out, outlen);
+}
+
 int cmvs_session_drawn(const cmvs_session *s)
 {
     return s ? cmvs_scene_drawn(cmvs_interp_scene(s->interp)) : 0;

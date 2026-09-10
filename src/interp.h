@@ -116,6 +116,16 @@ int cmvs_interp_system_capture(const cmvs_interp *in, cmvs_system *out,
 int cmvs_interp_system_restore(cmvs_interp *in, const cmvs_system *s,
                                char *err, size_t errlen);
 
+/*
+ * The line the reader is on. cmvs_interp_messages counts the message waits
+ * (command 0x153) that have been answered, so it numbers the lines of the
+ * scene from the start of the run; cmvs_interp_message writes the line
+ * currently on screen into `out` as UTF-8 and returns its length in bytes.
+ * Together they say WHERE in the story a run is, which a pc cannot.
+ */
+long cmvs_interp_messages(const cmvs_interp *in);
+int cmvs_interp_message(const cmvs_interp *in, char *out, size_t outlen);
+
 /* What the run did, for the desktop runner to print. */
 long cmvs_interp_statements(const cmvs_interp *in);
 int cmvs_interp_unimplemented(const cmvs_interp *in, int *distinct);
