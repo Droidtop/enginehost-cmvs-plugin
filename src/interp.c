@@ -3,17 +3,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #include "commands.h"
 #include "menu.h"
 #include "scene.h"
 #include "vm.h"
 
+/*
+ * The sizes are cmvs32.exe's, and the SAVE is what proves them: its records are
+ * 65536 bytes of stack, 256 bytes of frame pointers, 8192 bytes of int globals
+ * and 256 bytes of flags in the slot file with 0x7F00 more in system.dat. Four
+ * of these were larger here, invented rather than read, and a save cannot be
+ * byte-compatible with an array of a different length.
+ */
 #define MAX_SLOTS      8
-#define STACK_BYTES    (256 * 1024)
-#define MAX_DEPTH      256
-#define GLOBALS        0x4000     /* the int array at 0x596d78 */
-#define FLAGS          0x10000    /* the bit array at 0x5bcd80 */
+#define STACK_BYTES    (64 * 1024)   /* +0x3b20, and record 0x243 */
+#define MAX_DEPTH      64            /* +0x13c28, and record 0x242 */
+#define GLOBALS        4096          /* the int array at 0x596d78 */
+#define FLAGS          0x40000       /* the bit array at 0x5bcd80, 0x8000 bytes */
 #define SCRIPT_VARS    0x4000     /* the per-script area at +0x3aec */
 #define COMMANDS       0x400
 #define FGLOBALS       2048       /* the float array at 0x5bad80 */
@@ -99,6 +108,19 @@ struct cmvs_interp {
     char scratch[SCRATCH];
     char gstring[GSTRINGS][GSTRING_SIZE];
 
+    /*
+     * The saves. save_base is the host's folder and save_folder is the one
+     * command 0x016 names inside it; image is the record list the current
+     * state was loaded from, kept so a save written from it re-emits the
+     * records this engine does not model yet rather than dropping them.
+     */
+    char save_base[512];
+    char save_folder[640];
+    int thumb_w, thumb_h;       /* +0x282c and +0x2830, command 0x2b0 */
+    int thumb_on;               /* +0x2828 */
+    cmvs_save image;
+    int have_image;
+
     int running;       /* still executing this frame */
     int alive;         /* the script has not run off its end */
     int trace;
@@ -138,6 +160,7 @@ void cmvs_interp_free(cmvs_interp *in)
     if (!in) return;
     for (i = 0; i < MAX_SLOTS; i++)
         if (in->slot[i].loaded) cmvs_script_close(&in->slot[i].script);
+    cmvs_save_free(&in->image);
     cmvs_audio_free(in->audio);
     cmvs_menus_free(in->menus);
     cmvs_scene_free(in->scene);
@@ -1085,6 +1108,7 @@ static const char *as_string(cmvs_interp *in, int32_t v)
  * script ends on it rather than running off its own end.
  */
 static int command_builtin(cmvs_interp *in, int command);
+static void ensure_folder(const char *path);
 static int load_slot(cmvs_interp *in, int slot, const char *name, char *err, size_t errlen);
 static int enter_script(cmvs_interp *in, const char *name, char *err, size_t errlen);
 
@@ -1947,6 +1971,116 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = 1;
         return CMVS_CMD_OWN;
     }
+    /* ------------------------------------------------------------- the saves */
+    case 0x016: {
+        /*
+         * 0x00463340: the save folder. The script hands it a name ("save\\" in
+         * ChronoClock's start.ps3) which the engine appends to its base
+         * directory at +0x1510. Here the base is the HOST's folder and never
+         * the game folder, so a game's install stays read-only on both
+         * platforms.
+         */
+        char folder[640];
+        size_t at;
+        in->command_known[command] = 1;
+        if (!name || !in->save_base[0]) {
+            if (!in->save_base[0])
+                fprintf(stderr, "cmvs: no save folder: the host gave the engine none\n");
+            return 0;
+        }
+        snprintf(folder, sizeof folder, "%s/%s", in->save_base, name);
+        /* The script writes a Windows path separator; one separator here. */
+        for (at = 0; folder[at]; at++) if (folder[at] == '\\') folder[at] = '/';
+        while (at > 1 && folder[at - 1] == '/') folder[--at] = 0;
+        snprintf(in->save_folder, sizeof in->save_folder, "%s", folder);
+        /* Made now, not at the first write: a folder that is named but not
+         * there reads as "saves are kept in ..." in the log and then fails
+         * silently the first time a reader saves. */
+        ensure_folder(in->save_folder);
+        fprintf(stderr, "cmvs: saves are kept in %s\n", in->save_folder);
+        /* The settings the player left behind belong to the folder, so they
+         * are read the moment the folder is known. */
+        cmvs_interp_load_system(in, NULL, 0);
+        return 0;
+    }
+    case 0x2b0:   /* 0x0046bb90: the thumbnail size, and whether to take one */
+        in->thumb_h = arg(in, 2, 0);
+        in->thumb_w = arg(in, 2, 1);
+        in->thumb_on = in->thumb_w && in->thumb_h;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2b1:   /* 0x0046bbe0: one more number, into +0x2834 */
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2b2:
+        /*
+         * 0x0046bc00: the resume point is HERE. The original steps its pc past
+         * itself before it captures, so a loaded save resumes AFTER this
+         * command rather than taking itself again; ours captures with the pc
+         * already stepped and lets the table's 0x4000 do the step.
+         */
+        in->pc += 2;
+        in->repeat = 0;
+        {
+            cmvs_save taken;
+            char why[256];
+            if (cmvs_interp_capture(in, &taken, why, sizeof why)) {
+                cmvs_save_free(&in->image);
+                in->have_image = cmvs_save_clone(&in->image, &taken);
+                cmvs_save_free(&taken);
+            } else if (in->trace) {
+                fprintf(stderr, "  cannot capture the state: %s\n", why);
+            }
+        }
+        in->pc -= 2;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2b3:   /* 0x0046bc30: how many slots the list screen shows */
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2b4:   /* 0x0046bcc0: the persistent settings block */
+        cmvs_interp_load_system(in, NULL, 0);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2b5: {
+        /*
+         * 0x00470bd0 -> 0x004702b0: LOAD the slot. The original answers 0x2000
+         * while the load is still running and 0 when it is done, and never
+         * 0x4000, because on success the pc belongs to the save. Ours is
+         * synchronous: on success the restored pc stands and nothing advances;
+         * on failure the table's own 0x4004 steps past the call so the script
+         * cannot spin on a slot that is not there.
+         */
+        int32_t slot = arg(in, 1, 0);
+        char why[256];
+        in->command_known[command] = 1;
+        if (slot < 0 || slot > 0x3e7) return 0;
+        if (!cmvs_interp_load_slot(in, (int) slot, why, sizeof why)) {
+            fprintf(stderr, "cmvs: slot %d not loaded: %s\n", (int) slot, why);
+            return 0;
+        }
+        return CMVS_CMD_OWN;
+    }
+    case 0x2b6: {   /* 0x0046fc30 -> 0x0046f490: write the slot */
+        int32_t slot = arg(in, 1, 0);
+        char why[256];
+        in->command_known[command] = 1;
+        if (slot < 0 || slot > 0x3e7) return 0;
+        if (!cmvs_interp_save_slot(in, (int) slot, why, sizeof why))
+            fprintf(stderr, "cmvs: slot %d not saved: %s\n", (int) slot, why);
+        return 0;
+    }
+    case 0x28d:   /* 0x0046c480 -> 0x0045bc90: the slot is gone */
+        in->command_known[command] = 1;
+        cmvs_interp_delete_slot(in, arg(in, 1, 0));
+        return 0;
+    case 0x129: {   /* 0x004715d5 -> 0x00414f50: write system.dat */
+        char why[256];
+        in->command_known[command] = 1;
+        if (!cmvs_interp_save_system(in, why, sizeof why))
+            fprintf(stderr, "cmvs: system.dat not written: %s\n", why);
+        return 0;
+    }
     default:
         return 0;
     }
@@ -2155,6 +2289,593 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
         if (in->pc < 0 || in->pc >= code(in)->code_size) { in->running = 0; in->alive = 0; }
     }
     return in->alive;
+}
+
+/* ---------------------------------------------------------------- the saves
+ *
+ * A CSV2 slot file is the engine's own state, record by record, and this is
+ * where our state becomes those records and back. save.c owns the container -
+ * the LZSS, the cipher, the checksum, the record shapes - and knows nothing
+ * about an interpreter; this knows nothing about compression. The division is
+ * what lets the container be tested against the user's real files on its own.
+ *
+ * Two rules run through all of it:
+ *
+ * 1. A record we do not model is CARRIED, not dropped. A save read here keeps
+ *    its whole record list, and a save written from that state re-emits the
+ *    records we cannot yet produce - the layers, the scene parts, the backlog -
+ *    exactly as they arrived. The original's reader skips a tag it does not
+ *    know WITHOUT consuming the payload, so a list with a hole in it would
+ *    desynchronise it; carrying is not politeness, it is the only way a file of
+ *    ours stays loadable on the PC.
+ * 2. Sizes come from the original, not from us. The arrays at the top of this
+ *    file were bigger than cmvs32.exe's in three places, and a save is the one
+ *    thing that cannot paper over that: the record is 8192 bytes of int globals
+ *    because there are 2048 of them in the low half, and no other number reads.
+ */
+
+static int32_t get32(const uint8_t *p)
+{
+    return (int32_t) ((uint32_t) p[0] | ((uint32_t) p[1] << 8)
+                    | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24));
+}
+
+static void put32(uint8_t *p, int32_t v)
+{
+    uint32_t u = (uint32_t) v;
+    p[0] = (uint8_t) u; p[1] = (uint8_t) (u >> 8);
+    p[2] = (uint8_t) (u >> 16); p[3] = (uint8_t) (u >> 24);
+}
+
+/* Every parent of `path`, then `path`. The host's own directory exists; the
+ * one the script names inside it (command 0x016) does not, the first time. */
+static void ensure_folder(const char *path)
+{
+    char work[1024];
+    size_t at;
+    snprintf(work, sizeof work, "%s", path);
+    for (at = 1; work[at]; at++) {
+        if (work[at] != '/') continue;
+        work[at] = 0;
+        mkdir(work, 0770);
+        work[at] = '/';
+    }
+    mkdir(work, 0770);
+}
+
+void cmvs_interp_save_base(cmvs_interp *in, const char *dir)
+{
+    if (!in) return;
+    snprintf(in->save_base, sizeof in->save_base, "%s", dir ? dir : "");
+    /*
+     * With no folder from the host the engine has NO save folder. It does not
+     * fall back to the game folder: the game folder is the user's install and
+     * nothing of ours is written into it, on any platform.
+     */
+    if (!in->save_base[0]) in->save_folder[0] = 0;
+}
+
+const char *cmvs_interp_save_folder(const cmvs_interp *in)
+{
+    return in && in->save_folder[0] ? in->save_folder : NULL;
+}
+
+static int slot_path(const cmvs_interp *in, int slot, char *out, size_t n)
+{
+    if (!in->save_folder[0]) return 0;
+    snprintf(out, n, "%s/save%03d.dat", in->save_folder, slot);
+    return 1;
+}
+
+static int system_path(const cmvs_interp *in, const char *name, char *out, size_t n)
+{
+    if (!in->save_folder[0]) return 0;
+    snprintf(out, n, "%s/%s", in->save_folder, name);
+    return 1;
+}
+
+static uint8_t *read_file(const char *path, int *size_out)
+{
+    FILE *f = fopen(path, "rb");
+    uint8_t *buf;
+    long size;
+
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0) { fclose(f); return NULL; }
+    buf = malloc((size_t) size);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t) size, f) != (size_t) size) { free(buf); fclose(f); return NULL; }
+    fclose(f);
+    *size_out = (int) size;
+    return buf;
+}
+
+static int write_file(const char *path, const uint8_t *data, int size)
+{
+    FILE *f = fopen(path, "wb");
+    int ok;
+    if (!f) return 0;
+    ok = fwrite(data, 1, (size_t) size, f) == (size_t) size;
+    fclose(f);
+    return ok;
+}
+
+/*
+ * The thumbnail: a plain 24-bit BMP of the frame that is on screen, bottom-up,
+ * at the size command 0x2b0 asked for. The reference saves are 192 x 108 and
+ * the BMP in them says 192 wide, which is what settles which of that command's
+ * two arguments is the width.
+ */
+static uint8_t *thumbnail(cmvs_interp *in, int *size_out)
+{
+    int w = in->thumb_w > 0 ? in->thumb_w : 192;
+    int h = in->thumb_h > 0 ? in->thumb_h : 108;
+    int sw = 0, sh = 0, stride, size, x, y;
+    const uint8_t *src = cmvs_scene_compose(in->scene, &sw, &sh);
+    uint8_t *bmp;
+
+    if (!src || sw <= 0 || sh <= 0) return NULL;
+    stride = (w * 3 + 3) & ~3;
+    size = 54 + stride * h;
+    bmp = calloc((size_t) size, 1);
+    if (!bmp) return NULL;
+
+    bmp[0] = 'B'; bmp[1] = 'M';
+    put32(bmp + 2, size);
+    put32(bmp + 10, 54);
+    put32(bmp + 14, 40);
+    put32(bmp + 18, w);
+    put32(bmp + 22, h);
+    bmp[26] = 1;                      /* planes */
+    bmp[28] = 24;                     /* bits */
+    put32(bmp + 34, stride * h);
+
+    /* Nearest neighbour, and bottom-up: BMP row 0 is the bottom of the
+     * picture, which is why the source row is counted from the far end. */
+    for (y = 0; y < h; y++) {
+        const uint8_t *row = src + (size_t) ((sh - 1 - y * sh / h)) * (size_t) sw * 4;
+        uint8_t *out = bmp + 54 + (size_t) y * (size_t) stride;
+        for (x = 0; x < w; x++) {
+            const uint8_t *px = row + (size_t) (x * sw / w) * 4;
+            out[x * 3 + 0] = px[0];   /* the scene is BGRA and a BMP is BGR */
+            out[x * 3 + 1] = px[1];
+            out[x * 3 + 2] = px[2];
+        }
+    }
+    *size_out = size;
+    return bmp;
+}
+
+/* ------------------------------------------------------ state into records */
+
+/*
+ * The 64 registered procedures, in the original's own layout: one dword, then
+ * 64 entries of seven dwords, taken from +0x33c4. 0x004634d0 writes six of the
+ * seven fields of an entry:
+ *
+ *   +0x00  zero
+ *   +0x04  the script slot the procedure is in
+ *   +0x08  its label - and -1, NOT zero, in an entry nothing is registered in,
+ *          which is how the original tells an empty slot from a label at 0
+ *   +0x0c  }
+ *   +0x10  } the three values the script registered with it
+ *   +0x14  }
+ *   +0x18  whatever 0x004075e0 answers: 1373 for the procedures registered
+ *          out of script slot 1 and 1374 out of slot 2 in the reference save,
+ *          so it is a per-script serial of the engine's own and not anything
+ *          this engine can compute
+ *
+ * Two fields here are UNPROVEN and are therefore carried rather than invented:
+ * +0x18, and the dword at the head of the record, which is 1 in the reference
+ * save (so it is not the count of registered procedures - that save has
+ * thirteen). Both are taken from the record the state was loaded with when
+ * there is one.
+ */
+#define PROC_ENTRY 0x1C
+#define PROC_BYTES (4 + 64 * PROC_ENTRY)
+
+static void capture_procs(const cmvs_interp *in, uint8_t *out, const cmvs_record *was)
+{
+    const uint8_t *before = (was && was->len >= PROC_BYTES) ? was->data : NULL;
+    int i;
+
+    memset(out, 0, PROC_BYTES);
+    put32(out, before ? get32(before) : 1);
+    for (i = 0; i < 64; i++) {
+        uint8_t *e = out + 4 + i * PROC_ENTRY;
+        if (before) memcpy(e + 0x18, before + 4 + i * PROC_ENTRY + 0x18, 4);
+        if (!in->proc[i].used) { put32(e + 0x08, -1); continue; }
+        put32(e + 0x04, in->proc[i].slot);
+        put32(e + 0x08, in->proc[i].pc);
+        put32(e + 0x0c, in->proc[i].a);
+        put32(e + 0x10, in->proc[i].b);
+        put32(e + 0x14, in->proc[i].c);
+    }
+}
+
+static void restore_procs(cmvs_interp *in, const uint8_t *data, int len)
+{
+    int i;
+    if (len < PROC_BYTES) return;
+    for (i = 0; i < 64; i++) {
+        const uint8_t *e = data + 4 + i * PROC_ENTRY;
+        in->proc[i].slot = get32(e + 0x04);
+        in->proc[i].pc = get32(e + 0x08);
+        in->proc[i].a = get32(e + 0x0c);
+        in->proc[i].b = get32(e + 0x10);
+        in->proc[i].c = get32(e + 0x14);
+        in->proc[i].used = in->proc[i].pc != -1;
+        if (!in->proc[i].used) in->proc[i].pc = 0;
+    }
+}
+
+static void capture_name(cmvs_save *s, unsigned tag, const char *text)
+{
+    cmvs_save_set(s, tag, 0, text ? text : "", (int) strlen(text ? text : "") + 1);
+}
+
+int cmvs_interp_capture(cmvs_interp *in, cmvs_save *out, char *err, size_t errlen)
+{
+    uint8_t small[PROC_BYTES];
+    int32_t frames[64];
+    int i, at;
+
+    if (in->current < 0) { fail(err, errlen, "nothing is running to save"); return 0; }
+
+    if (in->have_image) {
+        if (!cmvs_save_clone(out, &in->image)) { fail(err, errlen, "out of memory"); return 0; }
+    } else {
+        cmvs_save_init(out);
+        memcpy(out->header, "CSV2", 4);
+        put32(out->header + 0x008, 0x00010000);   /* the version at +0x2930 */
+        put32(out->header + 0x210, 1);
+    }
+
+    /* Which scripts are loaded, and where the resume point is. */
+    capture_name(out, 0x102, in->slot[in->current].name);
+    capture_name(out, 0x103, in->slot[1].loaded ? in->slot[1].name : "");
+    capture_name(out, 0x104, in->slot[2].loaded ? in->slot[2].name : "");
+    put32(small, in->slot[in->current].script.size);
+    cmvs_save_set(out, 0x112, 0, small, 4);
+    put32(small, in->current);   cmvs_save_set(out, 0x106, 0, small, 4);
+    put32(small, in->pc);        cmvs_save_set(out, 0x107, 0, small, 4);
+    put32(small, in->repeat);    cmvs_save_set(out, 0x108, 0, small, 4);
+
+    for (i = 0; i < 10; i++) put32(small + i * 4, in->timer[i]);
+    cmvs_save_set(out, 0x109, 0, small, 40);
+
+    capture_procs(in, small, cmvs_save_find(out, 0x10b, 0));
+    cmvs_save_set(out, 0x10b, 0, small, PROC_BYTES);
+
+    /* The call machine. */
+    put32(small, in->sp);    cmvs_save_set(out, 0x240, 0, small, 4);
+    put32(small, in->depth); cmvs_save_set(out, 0x241, 0, small, 4);
+    for (i = 0; i < 64; i++) frames[i] = i < MAX_DEPTH ? in->frame[i] : 0;
+    cmvs_save_set(out, 0x242, 0, frames, sizeof frames);
+    cmvs_save_set(out, 0x243, 0, in->stack, STACK_BYTES);
+
+    /* sys[0..10]: seven ints and four floats, 44 bytes, all of them dwords. */
+    for (i = 0; i < 11; i++) put32(small + i * 4, in->sys[i]);
+    cmvs_save_set(out, 0x248, 0, small, 44);
+
+    /* The low half of every global array. The high half is system.dat's. */
+    cmvs_save_set(out, 0x280, 0, in->globals, 2048 * 4);
+    cmvs_save_set(out, 0x281, 0, in->fglobals, 1024 * 4);
+    cmvs_save_set(out, 0x282, 0, in->flags, 256);
+    {
+        /*
+         * Global strings 0..63: one dword, then that many NUL-terminated
+         * strings back to back. The dword is 0 in the reference save, so it is
+         * NOT a byte count and nothing here writes one - it is carried when
+         * there is a record to carry it from.
+         *
+         * One difference from the original that is not understood and is not
+         * papered over: the reference record holds SIXTY strings in 297 bytes,
+         * and this writes all sixty-four, so the record comes out four bytes
+         * longer. The reader takes as many as the record's own length holds,
+         * so a longer one loses nothing; why the original stopped at sixty is
+         * unproven.
+         */
+        const cmvs_record *was = cmvs_save_find(out, 0x283, 0);
+        uint8_t *strings = malloc(4 + 64 * (size_t) GSTRING_SIZE);
+        if (!strings) { cmvs_save_free(out); fail(err, errlen, "out of memory"); return 0; }
+        put32(strings, was && was->len >= 4 ? get32(was->data) : 0);
+        at = 4;
+        for (i = 0; i < 64; i++) {
+            size_t n = strlen(in->gstring[i]) + 1;
+            memcpy(strings + at, in->gstring[i], n);
+            at += (int) n;
+        }
+        cmvs_save_set(out, 0x283, 0, strings, at);
+        free(strings);
+    }
+    /* The script's own variable area, which travels with the script. */
+    cmvs_save_set(out, 0x900, 0, in->slot[in->current].vars,
+                  in->slot[in->current].script.vars_size);
+
+    /* Stream C is the script the resume point is in, carried whole - which is
+     * what makes the pc in record 0x107 mean something on the other machine. */
+    free(out->script);
+    out->script = NULL;
+    out->script_size = 0;
+    if (in->slot[in->current].script.data && in->slot[in->current].script.size > 0) {
+        out->script = malloc((size_t) in->slot[in->current].script.size);
+        if (out->script) {
+            memcpy(out->script, in->slot[in->current].script.data,
+                   (size_t) in->slot[in->current].script.size);
+            out->script_size = in->slot[in->current].script.size;
+        }
+    }
+
+    /* The picture on screen, and the time, the way the file writer stamps it. */
+    {
+        int size = 0;
+        uint8_t *bmp = thumbnail(in, &size);
+        if (bmp) {
+            free(out->thumb);
+            out->thumb = bmp;
+            out->thumb_size = size;
+        }
+    }
+    {
+        time_t now = time(NULL);
+        struct tm parts;
+        char caption[0x100];
+        const cmvs_record *title = cmvs_save_find(out, 0x100, 0);
+#ifdef _WIN32
+        parts = *localtime(&now);
+#else
+        localtime_r(&now, &parts);
+#endif
+        snprintf(caption, sizeof caption, "%04d-%02d-%02d %02d:%02d:%02d %s",
+                 parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday,
+                 parts.tm_hour, parts.tm_min, parts.tm_sec,
+                 title && title->len ? (const char *) title->data : "");
+        memset(out->header + CMVS_SAVE_CAPTION, 0, 0x100);
+        memcpy(out->header + CMVS_SAVE_CAPTION, caption, strlen(caption));
+    }
+    return 1;
+}
+
+int cmvs_interp_restore(cmvs_interp *in, const cmvs_save *s, char *err, size_t errlen)
+{
+    const cmvs_record *r;
+    int current = 0, i;
+    char name[128];
+
+    r = cmvs_save_find(s, 0x106, 0);
+    if (r && r->len >= 4) current = get32(r->data);
+    if (current < 0 || current >= MAX_SLOTS) current = 0;
+
+    r = cmvs_save_find(s, 0x102, 0);
+    if (!r || !r->len) { fail(err, errlen, "the save does not name a script"); return 0; }
+    snprintf(name, sizeof name, "%s", (const char *) r->data);
+
+    /*
+     * The running script comes out of the SAVE, not out of the archive: the
+     * file carries its own copy for exactly this reason, and a pc means
+     * nothing against a different build of the same name.
+     */
+    if (in->slot[current].loaded) cmvs_script_close(&in->slot[current].script);
+    memset(&in->slot[current], 0, sizeof in->slot[current]);
+    if (s->script && s->script_size > 0) {
+        uint8_t *copy = malloc((size_t) s->script_size);
+        if (!copy) { fail(err, errlen, "out of memory"); return 0; }
+        memcpy(copy, s->script, (size_t) s->script_size);
+        if (!cmvs_script_open(copy, s->script_size, &in->slot[current].script, err, errlen))
+            return 0;
+        in->slot[current].loaded = 1;
+        snprintf(in->slot[current].name, sizeof in->slot[current].name, "%s", name);
+    } else if (!load_slot(in, current, name, err, errlen)) {
+        return 0;
+    }
+
+    /* The two scripts the boot chain leaves in slots 1 and 2 hold the
+     * procedures every scene calls, so a resume without them runs into an
+     * unregistered 0x08a on its first line. */
+    r = cmvs_save_find(s, 0x103, 0);
+    if (r && r->len > 1 && current != 1) load_slot(in, 1, (const char *) r->data, NULL, 0);
+    r = cmvs_save_find(s, 0x104, 0);
+    if (r && r->len > 1 && current != 2) load_slot(in, 2, (const char *) r->data, NULL, 0);
+
+    in->current = current;
+    r = cmvs_save_find(s, 0x107, 0); if (r && r->len >= 4) in->pc = get32(r->data);
+    r = cmvs_save_find(s, 0x108, 0); if (r && r->len >= 4) in->repeat = get32(r->data);
+    r = cmvs_save_find(s, 0x109, 0);
+    if (r && r->len >= 40) for (i = 0; i < 10; i++) in->timer[i] = get32(r->data + i * 4);
+    r = cmvs_save_find(s, 0x10b, 0); if (r) restore_procs(in, r->data, r->len);
+
+    r = cmvs_save_find(s, 0x240, 0); if (r && r->len >= 4) in->sp = get32(r->data);
+    r = cmvs_save_find(s, 0x241, 0); if (r && r->len >= 4) in->depth = get32(r->data);
+    r = cmvs_save_find(s, 0x242, 0);
+    if (r && r->len >= 4)
+        for (i = 0; i < MAX_DEPTH && i * 4 + 4 <= r->len; i++) in->frame[i] = get32(r->data + i * 4);
+    r = cmvs_save_find(s, 0x243, 0);
+    if (r) memcpy(in->stack, r->data, (size_t) (r->len < STACK_BYTES ? r->len : STACK_BYTES));
+    r = cmvs_save_find(s, 0x248, 0);
+    if (r) for (i = 0; i < 11 && i * 4 + 4 <= r->len; i++) in->sys[i] = get32(r->data + i * 4);
+
+    r = cmvs_save_find(s, 0x280, 0);
+    if (r) memcpy(in->globals, r->data, (size_t) (r->len < 2048 * 4 ? r->len : 2048 * 4));
+    r = cmvs_save_find(s, 0x281, 0);
+    if (r) memcpy(in->fglobals, r->data, (size_t) (r->len < 1024 * 4 ? r->len : 1024 * 4));
+    r = cmvs_save_find(s, 0x282, 0);
+    if (r) memcpy(in->flags, r->data, (size_t) (r->len < 256 ? r->len : 256));
+    r = cmvs_save_find(s, 0x283, 0);
+    if (r && r->len > 4) {
+        int at = 4;
+        for (i = 0; i < 64 && at < r->len; i++) {
+            snprintf(in->gstring[i], GSTRING_SIZE, "%s", (const char *) r->data + at);
+            at += (int) strlen((const char *) r->data + at) + 1;
+        }
+    }
+    r = cmvs_save_find(s, 0x900, 0);
+    if (r && r->len > 0)
+        memcpy(in->slot[current].vars, r->data,
+               (size_t) (r->len < SCRIPT_VARS ? r->len : SCRIPT_VARS));
+
+    if (in->sp < 0 || in->sp > STACK_BYTES - 4) in->sp = 0;
+    if (in->depth < 0 || in->depth >= MAX_DEPTH) in->depth = 0;
+    in->running = 1;
+    in->alive = 1;
+
+    /* Keep the whole list, so a save taken from this state re-emits the
+     * records we do not model yet instead of dropping them. */
+    cmvs_save_free(&in->image);
+    in->have_image = cmvs_save_clone(&in->image, s);
+    return 1;
+}
+
+/* -------------------------------------------------------------- system.dat */
+
+int cmvs_interp_system_capture(const cmvs_interp *in, cmvs_system *out,
+                               char *err, size_t errlen)
+{
+    int i, at;
+
+    cmvs_system_init(out);
+    memcpy(out->header, "CSS1", 4);
+    out->size = CMVS_SYS_STRINGS_OFF + 64 * GSTRING_SIZE;
+    out->payload = calloc((size_t) out->size, 1);
+    if (!out->payload) { fail(err, errlen, "out of memory"); return 0; }
+
+    memcpy(out->payload + CMVS_SYS_FLAGS_OFF, in->flags + 0x100, CMVS_SYS_FLAGS_SIZE);
+    for (i = 0; i < 2048; i++)
+        put32(out->payload + CMVS_SYS_INTS_OFF + i * 4, in->globals[2048 + i]);
+    memcpy(out->payload + CMVS_SYS_FLOATS_OFF, in->fglobals + 1024, CMVS_SYS_FLOATS_SIZE);
+    at = CMVS_SYS_STRINGS_OFF;
+    for (i = 64; i < 128; i++) {
+        size_t n = strlen(in->gstring[i]) + 1;
+        memcpy(out->payload + at, in->gstring[i], n);
+        at += (int) n;
+    }
+    out->size = at;
+    cmvs_system_params(out, (unsigned) time(NULL));
+    return 1;
+}
+
+int cmvs_interp_system_restore(cmvs_interp *in, const cmvs_system *s,
+                               char *err, size_t errlen)
+{
+    int i, at;
+
+    if (s->size < CMVS_SYS_STRINGS_OFF) {
+        fail(err, errlen, "the system file is too short to hold the persistent globals");
+        return 0;
+    }
+    memcpy(in->flags + 0x100, s->payload + CMVS_SYS_FLAGS_OFF, CMVS_SYS_FLAGS_SIZE);
+    for (i = 0; i < 2048; i++)
+        in->globals[2048 + i] = get32(s->payload + CMVS_SYS_INTS_OFF + i * 4);
+    memcpy(in->fglobals + 1024, s->payload + CMVS_SYS_FLOATS_OFF, CMVS_SYS_FLOATS_SIZE);
+    at = CMVS_SYS_STRINGS_OFF;
+    for (i = 64; i < 128 && at < s->size; i++) {
+        snprintf(in->gstring[i], GSTRING_SIZE, "%s", (const char *) s->payload + at);
+        at += (int) strlen((const char *) s->payload + at) + 1;
+    }
+    return 1;
+}
+
+/* ---------------------------------------------------------------- the files */
+
+int cmvs_interp_save_slot(cmvs_interp *in, int slot, char *err, size_t errlen)
+{
+    char path[1024];
+    cmvs_save save;
+    uint8_t *file;
+    int size = 0, ok;
+
+    if (!slot_path(in, slot, path, sizeof path)) {
+        fail(err, errlen, "there is no save folder: the host gave the engine none");
+        return 0;
+    }
+    if (!cmvs_interp_capture(in, &save, err, errlen)) return 0;
+    file = cmvs_save_write(&save, &size, err, errlen);
+    cmvs_save_free(&save);
+    if (!file) return 0;
+    ensure_folder(in->save_folder);
+    ok = write_file(path, file, size);
+    free(file);
+    if (!ok) { if (err && errlen) snprintf(err, errlen, "%s could not be written", path); return 0; }
+    fprintf(stderr, "cmvs: saved slot %d to %s (%d bytes)\n", slot, path, size);
+    return 1;
+}
+
+int cmvs_interp_load_slot(cmvs_interp *in, int slot, char *err, size_t errlen)
+{
+    char path[1024];
+    cmvs_save save;
+    uint8_t *file;
+    int size = 0, ok;
+
+    if (!slot_path(in, slot, path, sizeof path)) {
+        fail(err, errlen, "there is no save folder: the host gave the engine none");
+        return 0;
+    }
+    file = read_file(path, &size);
+    if (!file) { if (err && errlen) snprintf(err, errlen, "%s is not there", path); return 0; }
+    ok = cmvs_save_read(file, size, &save, err, errlen);
+    free(file);
+    if (!ok) return 0;
+    ok = cmvs_interp_restore(in, &save, err, errlen);
+    cmvs_save_free(&save);
+    if (ok) fprintf(stderr, "cmvs: loaded slot %d from %s\n", slot, path);
+    return ok;
+}
+
+int cmvs_interp_delete_slot(cmvs_interp *in, int slot)
+{
+    char path[1024];
+    if (!slot_path(in, slot, path, sizeof path)) return 0;
+    return remove(path) == 0;
+}
+
+int cmvs_interp_save_system(cmvs_interp *in, char *err, size_t errlen)
+{
+    char path[1024], backup[1024];
+    cmvs_system sys;
+    uint8_t *file, *previous;
+    int size = 0, previous_size = 0, ok;
+
+    if (!system_path(in, "system.dat", path, sizeof path)) {
+        fail(err, errlen, "there is no save folder: the host gave the engine none");
+        return 0;
+    }
+    if (!cmvs_interp_system_capture(in, &sys, err, errlen)) return 0;
+    file = cmvs_system_write(&sys, &size, err, errlen);
+    cmvs_system_free(&sys);
+    if (!file) return 0;
+    ensure_folder(in->save_folder);
+    /* The original copies the old file aside before every rewrite (0x00414f50),
+     * so a write interrupted here still leaves the player their settings. */
+    if (system_path(in, "system.bak", backup, sizeof backup)) {
+        previous = read_file(path, &previous_size);
+        if (previous) { write_file(backup, previous, previous_size); free(previous); }
+    }
+    ok = write_file(path, file, size);
+    free(file);
+    if (!ok) { if (err && errlen) snprintf(err, errlen, "%s could not be written", path); return 0; }
+    return 1;
+}
+
+int cmvs_interp_load_system(cmvs_interp *in, char *err, size_t errlen)
+{
+    char path[1024];
+    cmvs_system sys;
+    uint8_t *file;
+    int size = 0, ok;
+
+    if (!system_path(in, "system.dat", path, sizeof path)) return 0;
+    file = read_file(path, &size);
+    if (!file) return 0;
+    ok = cmvs_system_read(file, size, &sys, err, errlen);
+    free(file);
+    if (!ok) return 0;
+    ok = cmvs_interp_system_restore(in, &sys, err, errlen);
+    cmvs_system_free(&sys);
+    return ok;
 }
 
 int cmvs_interp_unimplemented(const cmvs_interp *in, int *distinct)

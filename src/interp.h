@@ -21,6 +21,7 @@
 #include "audio.h"
 #include "game.h"
 #include "input.h"
+#include "save.h"
 #include "scene.h"
 #include "script.h"
 
@@ -89,6 +90,31 @@ cmvs_input *cmvs_interp_input(cmvs_interp *in);
  * was, so a frontend's log can tell a press that arrived from one that did
  * not. */
 int cmvs_interp_menu_events(const cmvs_interp *in, int *last_item);
+
+/*
+ * The saves. The host names the folder; the boot script names a subfolder
+ * inside it (command 0x016); the files in it are the game's own CSV2 and CSS1,
+ * so a slot written here loads in the Windows game and one written there loads
+ * here. With no folder from the host the engine HAS no save folder and says so
+ * - it never writes into the game folder.
+ */
+void cmvs_interp_save_base(cmvs_interp *in, const char *dir);
+const char *cmvs_interp_save_folder(const cmvs_interp *in);
+
+int cmvs_interp_save_slot(cmvs_interp *in, int slot, char *err, size_t errlen);
+int cmvs_interp_load_slot(cmvs_interp *in, int slot, char *err, size_t errlen);
+int cmvs_interp_delete_slot(cmvs_interp *in, int slot);
+int cmvs_interp_save_system(cmvs_interp *in, char *err, size_t errlen);
+int cmvs_interp_load_system(cmvs_interp *in, char *err, size_t errlen);
+
+/* The state as records, and back, without a file in between - which is what
+ * the round-trip test drives. */
+int cmvs_interp_capture(cmvs_interp *in, cmvs_save *out, char *err, size_t errlen);
+int cmvs_interp_restore(cmvs_interp *in, const cmvs_save *s, char *err, size_t errlen);
+int cmvs_interp_system_capture(const cmvs_interp *in, cmvs_system *out,
+                               char *err, size_t errlen);
+int cmvs_interp_system_restore(cmvs_interp *in, const cmvs_system *s,
+                               char *err, size_t errlen);
 
 /* What the run did, for the desktop runner to print. */
 long cmvs_interp_statements(const cmvs_interp *in);
