@@ -27,6 +27,12 @@ LIBOBJECTS := $(filter-out $(BUILDDIR)/main.o,$(OBJECTS))
 # machine; name more and they are tested too, which is the point.
 GAMES ?= $(wildcard /root/re/chronoclock)
 
+# The reference saves the save test reads: the ones the user made in
+# ChronoClock on the Windows host. They are not in this repository - they are
+# one person's saves of one game and they live beside the format analysis in
+# the coordination folder - so the test skips what is not here.
+SAVES ?= $(wildcard /root/coordination/agents/cmvs/re/saves)
+
 CC       := gcc
 CSTD     := -std=c11
 WARN     := -Wall -Wextra -Wno-unused-parameter
@@ -59,11 +65,15 @@ $(BUILDDIR):
 
 # The tests need no display, no device and no network: they read the scheme
 # table and whatever real archives this machine happens to have.
-test: $(BUILDDIR)/test_schemes
+test: $(BUILDDIR)/test_schemes $(BUILDDIR)/test_saves
 	$(BUILDDIR)/test_schemes $(GAMES)
+	$(BUILDDIR)/test_saves $(SAVES) $(GAMES)
 
 $(BUILDDIR)/test_schemes: tests/test_schemes.c $(LIBOBJECTS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -o $@ tests/test_schemes.c $(LIBOBJECTS) $(LDFLAGS)
+
+$(BUILDDIR)/test_saves: tests/test_saves.c $(LIBOBJECTS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -o $@ tests/test_saves.c $(LIBOBJECTS) $(LDFLAGS)
 
 run: all
 	$(BUILDDIR)/$(TARGET) $(GAME)
