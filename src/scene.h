@@ -97,6 +97,13 @@ void cmvs_scene_offset(cmvs_scene *s, int object, int part, int x, int y);
  * down in that order rather than by object number. */
 void cmvs_scene_depth(cmvs_scene *s, int object, int part, int depth);
 
+/* Commands 0x048 and 0x186 (0x0045fb80 and 0x00467c80, both -> 0x0041bdb0,
+ * item +0x44): how opaque the item is, clamped ABOVE at 255 and not below, so
+ * a script that runs its counter past zero simply leaves the item invisible.
+ * This is what a CMVS transition is made of: the script itself walks the
+ * value between 0 and 255 a frame at a time, there is no fade command. */
+void cmvs_scene_alpha(cmvs_scene *s, int object, int part, int alpha);
+
 /* Command 0x215 shows a menu item's part (0x00432B70 sets +0xc38). A part
  * that has been hidden is not composed. */
 void cmvs_scene_show(cmvs_scene *s, int object, int part, int visible);

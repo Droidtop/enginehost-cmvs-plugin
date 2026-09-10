@@ -1266,6 +1266,10 @@ static int command_builtin(cmvs_interp *in, int command)
         cmvs_scene_depth(in->scene, arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0));
         in->command_known[command] = 1;
         return 0;
+    case 0x048:   /* 0x0045fb80 -> 0x41bdb0: how opaque it is */
+        cmvs_scene_alpha(in->scene, arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0));
+        in->command_known[command] = 1;
+        return 0;
     /* --------------------------------------------------- the staged scene */
     /*
      * An item is flat until one of these says otherwise. 0x042 (0x0045f800 ->
@@ -1466,6 +1470,11 @@ static int command_builtin(cmvs_interp *in, int command)
     case 0x185:   /* 0x00467b80 -> 0x00433330 -> 0x41bd40: an offset on top */
         cmvs_scene_offset(in->scene, CMVS_LAYER_OBJECT(arg(in, 4, 3)),
                           arg(in, 4, 2), arg(in, 4, 1), arg(in, 4, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x186:   /* 0x00467c80 -> 0x00433390 -> 0x41bdb0: how opaque it is */
+        cmvs_scene_alpha(in->scene, CMVS_LAYER_OBJECT(arg(in, 3, 2)),
+                         arg(in, 3, 1), arg(in, 3, 0));
         in->command_known[command] = 1;
         return 0;
     /* ------------------------------------------------------------ the text */

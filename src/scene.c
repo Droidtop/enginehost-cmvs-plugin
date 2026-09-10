@@ -273,6 +273,13 @@ void cmvs_scene_depth(cmvs_scene *s, int object, int part, int depth)
     o->item.depth = depth;
 }
 
+void cmvs_scene_alpha(cmvs_scene *s, int object, int part, int alpha)
+{
+    cmvs_object *o = reach(s, object, part);
+    if (!o) return;
+    o->item.alpha = alpha > 255 ? 255 : alpha;
+}
+
 void cmvs_scene_kind(cmvs_scene *s, int object, int part, int kind)
 {
     cmvs_object *o = reach(s, object, part);
