@@ -1189,7 +1189,8 @@ static int command_builtin(cmvs_interp *in, int command)
         if (!name) return 0;
         snprintf(wanted, sizeof wanted, "%s", name);
         if (!enter_script(in, wanted, why, sizeof why)) {
-            if (in->trace) fprintf(stderr, "  cannot enter %s: %s\n", wanted, why);
+            if (in->trace) fprintf(stderr, "  cannot enter %s (handle %08x at pc %06x): %s\n",
+                                   wanted, (unsigned) arg(in, 1, 0), (unsigned) in->pc, why);
             return CMVS_CMD_ADVANCE;
         }
         in->command_known[command] = 1;
