@@ -504,15 +504,21 @@ static void compose_flat_pass(cmvs_scene *s, int pass)
     int i, order = 0, any = 0;
     /*
      * They go down in the order command 0x047 gives them (item +0x28), not in
-     * object number: snky01.ps3 puts its background at 32 and the character
-     * sprite that stands in front of it at 99, while the sprite is object 20
-     * and the background object 29. By number the background wins and the girl
-     * is behind her own scenery. Equal orders keep their object number as the
+     * object number, and the list is kept DESCENDING (0x00435bc0): a bigger
+     * number is FARTHER, so it is drawn first and everything smaller lands on
+     * top of it. The title screen is the proof - the park is object 10's own
+     * item at 32 and the four captions are its parts at 28 - and so is the
+     * load window, which intproc.ps3 builds at 3..6 while the title is still
+     * on screen and which the park painted over when this ran the other way.
+     * A scene's own background is NOT ordered here: snky01.ps3 stages both its
+     * background and its character, and a staged pass is sorted by the
+     * distance in front of the camera instead. Equal orders keep their object
+     * number as the
      * tie-break, which is what the title screen relies on.
      */
     for (i = 0; i < CMVS_OBJECTS; i++) {
         if (!s->object[i] || pass_of(&s->object[i]->item) != pass) continue;
-        if (!any || s->object[i]->item.depth < order) order = s->object[i]->item.depth;
+        if (!any || s->object[i]->item.depth > order) order = s->object[i]->item.depth;
         any = 1;
     }
     while (any) {
@@ -523,8 +529,8 @@ static void compose_flat_pass(cmvs_scene *s, int pass)
                 draw_object(s, s->object[i], NULL, 0.0f, 0.0f, 1.0f, 1.0f, 255);
         for (i = 0; i < CMVS_OBJECTS; i++) {
             if (!s->object[i] || pass_of(&s->object[i]->item) != pass) continue;
-            if (s->object[i]->item.depth <= order) continue;
-            if (!more || s->object[i]->item.depth < next) next = s->object[i]->item.depth;
+            if (s->object[i]->item.depth >= order) continue;
+            if (!more || s->object[i]->item.depth > next) next = s->object[i]->item.depth;
             more = 1;
         }
         if (!more) break;
