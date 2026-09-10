@@ -54,6 +54,9 @@ public final class CmvsPlugin implements EnginePlugin {
 
     /** So the log says when a menu item fired rather than repeating the count. */
     private int menuEvents;
+
+    /** Each not-yet-implemented cmvs_* action, logged once. */
+    private final java.util.Set<String> loggedUnimplemented = new java.util.HashSet<>();
     private String script = "";
 
     @Override public void onCreate(EnginePluginSession session) throws Exception {
@@ -95,7 +98,23 @@ public final class CmvsPlugin implements EnginePlugin {
     }
 
     /**
-     * The pad, in the engine's own terms.
+     * The engine's own actions, arriving pre-normalized: Enginehost owns the
+     * controller map (docs/engine-bundle-format.md, "Controller input for
+     * android-activity plugins") and hands the plugin its 20 {@code cmvs_*}
+     * ids directly -- KEY_FUNCTION 01..21 named in
+     * coordination/agents/cmvs/KEY-FUNCTIONS.md, minus the four the host
+     * folds elsewhere (09 into 08, 22 has no desktop window here, 23/24 into
+     * 03/04). This class never sees a raw keycode or axis for anything but
+     * the left stick, which the host still reports as {@code left_x}/
+     * {@code left_y} because it is the analogue form of 03..06, not a
+     * KEY_FUNCTION of its own.
+     *
+     * <p>Only six of the twenty ids have an engine function to drive yet --
+     * confirm, cancel, the four cursor directions and the two quick slots.
+     * The other fourteen are real KEY_FUNCTIONs with nothing behind them in
+     * {@code src/input.h}; they are named here explicitly, accepted, and
+     * logged once, so a press is never silently dropped and never mistaken
+     * for one of the six that do something.
      *
      * <p>A direction does not push a free pointer around: the engine's menus
      * move their selection along the item links and then warp the pointer onto
@@ -103,34 +122,31 @@ public final class CmvsPlugin implements EnginePlugin {
      * Following that keeps the pad and the touchscreen one mechanism - the hit
      * test decides everything either way - instead of two that can disagree.
      * The menus here are vertical lists, so left steps back and right steps on,
-     * the same as up and down.
+     * the same as up and down (KEY-FUNCTIONS.md: 23/24 メニュー増減 are 03/04
+     * in a value context, the engine's own factory map agrees).
      */
     @Override public boolean onControllerEvent(EngineControllerEvent event) {
         if (engine == 0) return false;
         String action = event.action();
         switch (action) {
-            case "up":
-            case "left":
+            case "cmvs_cursor_up":
+            case "cmvs_cursor_left":
                 if (event.pressed()) nativeNavigate(engine, -1);
                 return true;
-            case "down":
-            case "right":
+            case "cmvs_cursor_down":
+            case "cmvs_cursor_right":
                 if (event.pressed()) nativeNavigate(engine, 1);
                 return true;
-            case "confirm":
+            case "cmvs_confirm":
                 nativeButton(engine, 0, event.pressed());
                 return true;
-            case "cancel":
+            case "cmvs_cancel":
                 nativeButton(engine, 1, event.pressed());
                 return true;
-            // KEY_FUNCTION 13 and 14 in the engine's own action list. The
-            // engine ships no pad binding for either (its factory defaults are
-            // F1 and F2), so which control sends these is the host's mapping to
-            // make; the plugin only carries them through.
-            case "quicksave":
+            case "cmvs_quick_save":
                 if (event.pressed()) quick(true);
                 return true;
-            case "quickload":
+            case "cmvs_quick_load":
                 if (event.pressed()) quick(false);
                 return true;
             case "left_x":
@@ -139,8 +155,37 @@ public final class CmvsPlugin implements EnginePlugin {
             case "left_y":
                 stickY = step(stickY, event.value());
                 return true;
+            // Real KEY_FUNCTIONs (KEY-FUNCTIONS.md 07, 08, 10, 11, 12, 15,
+            // 16, 17, 18, 19, 20, 21) with nothing in src/input.h to drive
+            // them yet. Logged once each so a press is visible in the log
+            // rather than silently dropped, and never redirected onto one of
+            // the six implemented actions above.
+            case "cmvs_hide_message_window":
+            case "cmvs_forced_skip":
+            case "cmvs_auto_advance":
+            case "cmvs_history_mode":
+            case "cmvs_replay_voice":
+            case "cmvs_popup_menu":
+            case "cmvs_history_up":
+            case "cmvs_history_down":
+            case "cmvs_config_screen":
+            case "cmvs_save_screen":
+            case "cmvs_load_screen":
+            case "cmvs_extended_advance":
+                logUnimplementedOnce(action);
+                return false;
             default:
                 return false;
+        }
+    }
+
+    /** So each not-yet-implemented KEY_FUNCTION says so in the log exactly
+     * once, instead of once per frame it is held. */
+    private void logUnimplementedOnce(String action) {
+        if (loggedUnimplemented.add(action)) {
+            session.host().log(Log.INFO, "cmvs",
+                    action + " is a real CMVS key function with nothing implemented "
+                            + "for it yet in src/input.h; the press is not acted on", null);
         }
     }
 
