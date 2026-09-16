@@ -481,10 +481,22 @@ static void test_advance(const char *dir, const char *game)
         free(reference); cmvs_session_close(s); return;
     }
 
-    /* One frame, so the wait the save resumes into runs once and says which
-     * layer the line is on; before that the engine has no line yet. */
-    cmvs_session_frame(s, err, sizeof err);
-    cmvs_session_message(s, line, sizeof line);
+    /*
+     * A few frames with nobody pressing, so the wait the save resumes into
+     * runs and says which layer the line is on; before that the engine has no
+     * line yet. It takes the same confirm the rest of the reading uses: the
+     * script runs its own per-frame poll loop before it reaches the line's
+     * wait, and that loop only lets go on a press. One press reveals the line
+     * without answering its wait, so the count is still at zero here - which
+     * is what the seven-line count below is measured from.
+     */
+    line[0] = 0;
+    for (i = 0; i < 8 && !line[0]; i++) {
+        cmvs_session_frame(s, err, sizeof err);
+        cmvs_session_button(s, 0, 1);
+        cmvs_session_button(s, 0, 0);
+        cmvs_session_message(s, line, sizeof line);
+    }
     check(strstr(line, "standing on the rooftop") != NULL,
           "the loaded save is resting on the line the user saved on");
 
@@ -662,6 +674,95 @@ done:
     free(before);
 }
 
+/*
+ * THE FIRST CHOICE, AND TAKING IT.
+ *
+ * test_advance reads seven lines; this reads the whole prologue. It is the one
+ * claim the per-frame poll commands are worth making: before them the engine
+ * stopped at the EIGHTH line of the prologue, in the frame loop snky01.ps3
+ * runs between that line and the next scene, because the loop's questions had
+ * no answers and sys[0] kept whatever the last measurement had left in it.
+ * With them answered the same deterministic reading - one confirm per frame -
+ * carries the story through snky01 into snky07 and stands at ChronoClock's
+ * first choice.
+ *
+ * The choice is one option, built by menu 0 at 0x030400..0x030F8A of
+ * snky07.ps3: the sheet select_chip.pb3 into graphic object 60, one item whose
+ * hit rectangle is 1000 x 64 at (160, 140), and the caption
+ *
+ *     Would not turn back time
+ *
+ * which the script writes with command 0x0f8 at 0x030C16 and 0x10b at
+ * 0x030CB2. re/saves/README.md carries it so a person can check the same words
+ * in the Windows game.
+ *
+ * How the choice is FOUND is the same thing a reader sees: the lines stop
+ * coming. Nothing is hard-coded about where it is - the run reads until two
+ * hundred frames pass with no new line, which is the choice waiting for a
+ * pointer, then puts the pointer in the middle of that hit rectangle and
+ * presses. If the click is taken the lines start again, and that is the check.
+ */
+#define CHOICE_IDLE   200      /* frames with no new line: the choice is up */
+#define CHOICE_BUDGET 12000    /* frames; it stands at the choice near 6100 */
+#define CHOICE_X      660      /* the middle of the item's 1000 x 64 box */
+#define CHOICE_Y      172
+
+static void test_choice(const char *dir, const char *game)
+{
+    char err[256] = {0}, path[1024], saves[1024];
+    cmvs_session *s;
+    uint8_t *reference;
+    int reference_size = 0, i, at = 0;
+    long last = -1, idle = 0, before = 0;
+
+    printf("the first choice, in %s\n", game);
+    snprintf(saves, sizeof saves, "%s/cmvs-choice-test", game_scratch());
+    s = cmvs_session_open(game, NULL, NULL, saves, err, sizeof err);
+    if (!s) { printf("  --    %s\n", err); return; }
+    for (i = 0; i < 400 && !cmvs_session_save_folder(s); i++)
+        cmvs_session_frame(s, err, sizeof err);
+    if (!cmvs_session_save_folder(s)) { cmvs_session_close(s); return; }
+
+    reference = slurp_from(dir, "save000.dat", &reference_size);
+    if (!reference) { cmvs_session_close(s); return; }
+    snprintf(path, sizeof path, "%s/save000.dat", cmvs_session_save_folder(s));
+    if (!write_out(path, reference, reference_size)) {
+        free(reference); cmvs_session_close(s); return;
+    }
+    free(reference);
+    if (!cmvs_session_load_slot(s, 0, err, sizeof err)) {
+        check(0, "the engine loads the user's save000.dat");
+        cmvs_session_close(s); return;
+    }
+
+    for (i = 0; i < CHOICE_BUDGET; i++) {
+        cmvs_session_frame(s, err, sizeof err);
+        cmvs_session_button(s, 0, 1);
+        cmvs_session_button(s, 0, 0);
+        if (cmvs_session_messages(s) != last) { last = cmvs_session_messages(s); idle = 0; continue; }
+        if (++idle <= CHOICE_IDLE) continue;
+        if (!at) {
+            at = i;
+            before = last;
+            printf("        the lines stop after %ld of them, at frame %d, in %s\n",
+                   before, at, cmvs_session_script(s));
+        }
+        /* The pointer goes where the item is, and the same press that turned
+         * every other line now lands on it. */
+        cmvs_session_pointer(s, CHOICE_X, CHOICE_Y);
+        if (cmvs_session_messages(s) > before) break;
+        if (i > at + 600) break;
+    }
+
+    check(at != 0, "the run reaches a place where the lines stop: the choice");
+    check(before > 1000, "and it is the whole prologue away from where it used to stop");
+    printf("        after the press: %ld lines, in %s\n",
+           cmvs_session_messages(s), cmvs_session_script(s));
+    check(cmvs_session_messages(s) > before,
+          "the press on the choice is taken and the story goes on");
+    cmvs_session_close(s);
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : NULL;
@@ -677,7 +778,7 @@ int main(int argc, char **argv)
     } else {
         printf("no reference saves given; the container tests need real files\n");
     }
-    if (dir && game) { test_state(dir, game); test_picture(dir, game); test_advance(dir, game); }
+    if (dir && game) { test_state(dir, game); test_picture(dir, game); test_advance(dir, game); test_choice(dir, game); }
     else printf("no game to save from; the engine round trip needs one\n");
 
     printf("\n%d checks, %d failed\n", checks, failures);

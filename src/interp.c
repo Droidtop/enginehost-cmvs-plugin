@@ -1702,6 +1702,124 @@ static int command_builtin(cmvs_interp *in, int command)
         in->sys[4] = in->input.confirm_held ? 1 : 0;
         in->command_known[command] = 1;
         return 0;
+    /*
+     * THE REST OF THE PER-FRAME POLL. These three are 0x1a0's own family, and
+     * they are what a scene's poll loop is made of: read an edge, act on it,
+     * CLEAR it, read the other button, clear that. With only 0x1a0 answered the
+     * loop had a reader and no way to consume what it read, so the script that
+     * runs between the eighth prologue line and the first choice never left it.
+     *
+     * The table entries are thunks and their bodies are three lines each:
+     *
+     *   0x1a1  0x00471A1B  ecx = this+0xcb8; call 0x00448B50; return 0x4000
+     *   0x1a2  0x00471A30 -> 0x00468A70 -> 0x00448B60
+     *   0x1a3  0x00471A3A  ecx = this+0xcb8; call 0x00448B90; return 0x4000
+     *
+     * and the accessors they call are the plainest possible pair-per-function
+     * readers on the input device. 0x00448B50 zeroes +0x43c and +0x444;
+     * 0x00448B90 zeroes +0x448 and +0x450. Those are KEY_FUNCTION_01's and
+     * KEY_FUNCTION_02's RELEASED and PRESSED edges - the two latched ones -
+     * and neither touches the held level in between, which is why a button
+     * held down across the clear still reads as held on the next frame.
+     * 0x00448B60 is 0x00448B20 one function along: it answers +0x448 and hands
+     * back +0x44c, so 0x1a2 fills sys[0] and sys[4] for function 02 exactly as
+     * 0x1a0 does for function 01.
+     *
+     * Where the latches come from is 0x004490xx, the frame's own input update:
+     * for each of a function's five bound codes it sets the held level when the
+     * key's counter at +0x570 is above zero, the pressed edge when that counter
+     * is exactly one, and the released edge when the previous frame's counter
+     * at +0x970 was above zero and this frame's is not.
+     */
+    case 0x1A1:     /* 0x00471a1b -> 0x00448b50 */
+        in->input.confirm_released = 0;
+        in->input.confirm_pressed = 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x1A2:     /* 0x00468a70 -> 0x00448b60: KEY_FUNCTION_02, +0x448 */
+        in->sys[0] = in->input.cancel_released ? 1 : 0;
+        in->sys[4] = in->input.cancel_held ? 1 : 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x1A3:     /* 0x00471a3a -> 0x00448b90 */
+        in->input.cancel_released = 0;
+        in->input.cancel_pressed = 0;
+        in->command_known[command] = 1;
+        return 0;
+    /*
+     * THE LOOP THE POLL SITS IN, and what actually holds it open.
+     *
+     * Between the eighth prologue line and the first choice, snky01.ps3 runs a
+     * transition and turns the whole frame into a poll: step, ask whether the
+     * transition is over, ask whether the player is skipping, and only then
+     * read the buttons. Four of those questions were unanswered, so sys[0]
+     * kept whatever the last measurement had put there and the loop had no
+     * reading under which it could end.
+     *
+     * None of the four is guessed. Each one is what its routine ANSWERS when
+     * no animation object is attached - and in this engine none ever is,
+     * because the two commands that would attach one (the setters behind the
+     * item at +0x78 and +0x84) are not implemented either. Answering their
+     * "nothing is running" value is the same choice command 0x34A already
+     * makes for an unbound key: a definite answer rather than a stale one.
+     *
+     *   0x1ed  0x00460730 -> 0x00433300 (item +0xc18) -> 0x0041C430:
+     *          CANCELS the item's own animation - it frees the object at item
+     *          +0x78 and zeroes the pointer. With nothing attached it does
+     *          nothing at all, which is exactly what it does here.
+     *   0x1ee  0x004607A0 -> 0x0041C4B0: "how far along is it". The routine's
+     *          FIRST instruction is the answer: item +0x78 null returns -1.
+     *   0x1fc  0x00460F50 -> 0x0041C800: the same cancel for the WORLD
+     *          animation at item +0x84. When one is attached 0x00420BD0
+     *          writes its current value back into item +0x2c/+0x30/+0x34
+     *          first; with none attached there is nothing to write back.
+     *   0x1fd  0x00460FC0 -> 0x0041C8D0: and its query, -1 when +0x84 is null.
+     *   0x2c6  0x0046C570 -> 0x00433680: is the OBJECT busy - 1 when +0x2c7c
+     *          is set, otherwise whether +0x2c80 is. Both are zero in an
+     *          object nothing has started, so the answer is 0.
+     *   0x2ef  0x0046BB30: is the player asking to SKIP. It reads two key
+     *          functions through 0x00448BE0 and 0x00448BF0 and the skip flag
+     *          in the settings block at +0x5b8, and it writes sys[0] on BOTH
+     *          paths - so 0 is its own answer when nothing is held and skip is
+     *          off, not an omission.
+     */
+    case 0x1ED:     /* 0x00460730 -> 0x0041c430: cancel the item animation */
+    case 0x1FC:     /* 0x00460f50 -> 0x0041c800: cancel the world animation */
+        in->command_known[command] = 1;
+        return 0;
+    case 0x1EE:     /* 0x004607a0 -> 0x0041c4b0 */
+    case 0x1FD:     /* 0x00460fc0 -> 0x0041c8d0 */
+        in->sys[0] = -1;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2C6:     /* 0x0046c570 -> 0x00433680 */
+        in->sys[0] = 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2EF:     /* 0x0046bb30 */
+        in->sys[0] = 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x362: {
+        /*
+         * 0x0046E900 -> 0x00447480 on the GESTURE recogniser at +0xcbc, and it
+         * is the one question the script asks in a choice's own frame loop.
+         * The routine is five instructions: it answers 1 only when its
+         * argument is 1 AND +0x58 is at least 0, and 0 otherwise. +0x58 is -1
+         * whenever no gesture is being drawn - 0x004474A0, the recogniser's
+         * reset, writes -1 into +0x2c, +0x58 and +0xac - so an engine with no
+         * recogniser at all is in exactly the state that answers 0.
+         *
+         * That is not a shortcut, it is the difference between a choice a
+         * player can answer and one nobody can: left unimplemented, sys[0]
+         * kept the 1 a previous command had put there, the script read it as
+         * "a gesture is still being drawn" and never let its menu poll run.
+         * ChronoClock's first choice is where that shows.
+         */
+        in->sys[0] = 0;
+        in->command_known[command] = 1;
+        return 0;
+    }
     case 0x34A:
         /*
          * 0x00469020 -> 0x00448f00: virtual button 20 (+0x52c), one of the
