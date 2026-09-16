@@ -70,10 +70,6 @@ void cmvs_interp_trace(cmvs_interp *in, int on);
  * Android wrapper will read it for the frame it hands to the surface. */
 cmvs_scene *cmvs_interp_scene(cmvs_interp *in);
 
-/* What the commands have drawn into. The runner reads it for a screenshot; the
- * Android wrapper will read it for the frame it hands to the surface. */
-cmvs_scene *cmvs_interp_scene(cmvs_interp *in);
-
 /* The mixer the sound commands play into. A frontend opens its own device at
  * cmvs_audio_rate() and calls cmvs_audio_mix from that device's thread; the
  * engine never opens one, because the desktop's is SDL2 and Android's is

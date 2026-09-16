@@ -53,7 +53,15 @@ struct cmvs_scene {
     cmvs_object *object[CMVS_OBJECTS + CMVS_LAYERS];
     cmvs_camera camera[CMVS_CAMERAS];
     cmvs_text text[CMVS_LAYERS];
-    int of_id[CMVS_TEXT_IDS];    /* the table at +0xbb0: which layer's text */
+    /*
+     * The table at +0xbb0 holds twelve text objects. An entry is either a
+     * layer's own (registered by command 0x15d, `of_id` says which layer) or
+     * one command 0x100 made for the script alone, which lives here and is
+     * placed by its own position rather than by a layer's.
+     */
+    int of_id[CMVS_TEXT_IDS];
+    cmvs_text id_text[CMVS_TEXT_IDS];
+    int id_used[CMVS_TEXT_IDS];
     cmvs_font *font;
     int drawn;                   /* how many items the last compose blitted */
 };
@@ -107,6 +115,7 @@ void cmvs_scene_free(cmvs_scene *s)
     if (!s) return;
     for (i = 0; i < CMVS_OBJECTS + CMVS_LAYERS; i++) object_free(s->object[i]);
     for (i = 0; i < CMVS_LAYERS; i++) cmvs_text_free(&s->text[i]);
+    for (i = 0; i < CMVS_TEXT_IDS; i++) cmvs_text_free(&s->id_text[i]);
     free(s->frame);
     free(s);
 }
@@ -326,6 +335,24 @@ void cmvs_scene_text_register(cmvs_scene *s, int id, int layer)
 {
     if (!s || id < 0 || id >= CMVS_TEXT_IDS) return;
     s->of_id[id] = (layer >= 0 && layer < CMVS_LAYERS) ? layer : -1;
+    if (s->of_id[id] >= 0) cmvs_scene_text_drop_id(s, id);
+}
+
+int cmvs_scene_text_create(cmvs_scene *s, int id)
+{
+    if (!s || id < 0 || id >= CMVS_TEXT_IDS) return 0;
+    cmvs_text_free(&s->id_text[id]);
+    cmvs_text_init(&s->id_text[id]);
+    s->id_used[id] = 1;
+    s->of_id[id] = -1;
+    return 1;
+}
+
+void cmvs_scene_text_drop_id(cmvs_scene *s, int id)
+{
+    if (!s || id < 0 || id >= CMVS_TEXT_IDS) return;
+    cmvs_text_free(&s->id_text[id]);
+    s->id_used[id] = 0;
 }
 
 void cmvs_scene_text_tick(cmvs_scene *s, int ms)
@@ -333,12 +360,15 @@ void cmvs_scene_text_tick(cmvs_scene *s, int ms)
     int i;
     if (!s) return;
     for (i = 0; i < CMVS_LAYERS; i++) cmvs_text_tick(&s->text[i], ms);
+    for (i = 0; i < CMVS_TEXT_IDS; i++)
+        if (s->id_used[i]) cmvs_text_tick(&s->id_text[i], ms);
 }
 
 cmvs_text *cmvs_scene_text_by_id(cmvs_scene *s, int id)
 {
-    if (!s || id < 0 || id >= CMVS_TEXT_IDS || s->of_id[id] < 0) return NULL;
-    return &s->text[s->of_id[id]];
+    if (!s || id < 0 || id >= CMVS_TEXT_IDS) return NULL;
+    if (s->of_id[id] >= 0) return &s->text[s->of_id[id]];
+    return s->id_used[id] ? &s->id_text[id] : NULL;
 }
 
 void cmvs_scene_font(cmvs_scene *s, cmvs_font *font) { if (s) s->font = font; }
@@ -842,6 +872,16 @@ const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
         cmvs_text_compose(&s->text[layer], s->font, s->frame, s->width, s->height,
                           o ? o->item.x + o->item.ox : 0,
                           o ? o->item.y + o->item.oy : 0);
+    }
+    /*
+     * The text objects a script made for itself go last, at their own
+     * position: a choice caption is written after the bar it sits on and the
+     * original's own object for it is created then too.
+     */
+    for (i = 0; i < CMVS_TEXT_IDS; i++) {
+        if (!s->id_used[i]) continue;
+        cmvs_text_compose(&s->id_text[i], s->font, s->frame, s->width, s->height,
+                          s->id_text[i].x, s->id_text[i].y);
     }
     if (width) *width = s->width;
     if (height) *height = s->height;

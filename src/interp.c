@@ -1973,6 +1973,102 @@ static int command_builtin(cmvs_interp *in, int command)
             in->command_known[command] = text != NULL;
         }
         return 0;
+    /*
+     * THE TEXT OBJECTS A SCRIPT ADDRESSES BY ID.
+     *
+     * 0x100..0x11a are the second half of the text vocabulary. Every one of
+     * them reaches [machine + id*4 + 0xbb0] with the id in its LAST argument
+     * and a bound of twelve, and then calls the very setters the 0x14x family
+     * calls on a layer's own object - 0x00450420 for the box, 0x00450450 for
+     * the size, 0x00450520 for the colours, 0x004506a0 to clear. The two
+     * families are one class of object addressed two ways, and 0x15d is what
+     * puts a layer's object into the table so the measuring commands can find
+     * it.
+     *
+     * snky07.ps3's first choice is written with these: 0x100 makes object 1,
+     * 0x103 gives it the whole screen as a box, 0x105 size 26, 0x107 white,
+     * 0x10c puts the pen at (448, 178) - inside the choice bar's own hit
+     * rectangle - and 0x10b writes "Would not turn back time" into it.
+     */
+    case 0x100: {   /* 0x00463850: make the text object at +0xbb0[id] */
+        in->command_known[command] =
+            cmvs_scene_text_create(in->scene, arg(in, 3, 2));
+        return 0;
+    }
+    case 0x101:     /* 0x00463b70 -> 0x00451820: and drop it again */
+        cmvs_scene_text_drop_id(in->scene, arg(in, 1, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x102: {   /* 0x00463bd0 -> 0x004503e0: where the object itself sits */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 3, 2));
+        if (t) cmvs_text_at(t, arg(in, 3, 1), arg(in, 3, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x103: {   /* 0x00463c20 -> 0x00450420: the box, and the pen with it */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 5, 4));
+        if (t) cmvs_text_box(t, arg(in, 5, 3), arg(in, 5, 2),
+                                arg(in, 5, 1), arg(in, 5, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x104: {   /* 0x00463c70 -> 0x004506a0: the line is gone */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 1, 0));
+        if (t) cmvs_text_clear(t);
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x105: {   /* 0x00463cb0 -> 0x00450450: size, character gap, line gap */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 4, 3));
+        if (t) cmvs_text_size(t, arg(in, 4, 2), arg(in, 4, 1), arg(in, 4, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x107: {   /* 0x00463d50 -> 0x00450520: the two colours */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 3, 2));
+        if (t) cmvs_text_colours(t, (uint32_t) arg(in, 3, 1),
+                                    (uint32_t) arg(in, 3, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x10A: {   /* 0x00463e40 -> 0x00451120: write the line, typed out */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 2, 1));
+        const char *text = string_text(in, arg(in, 2, 0));
+        if (t && text) cmvs_text_draw(t, text);
+        in->command_known[command] = t && text;
+        return 0;
+    }
+    case 0x10B: {   /* 0x00463ea0 -> 0x00450dc0: write it whole, no reveal */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 2, 1));
+        const char *text = string_text(in, arg(in, 2, 0));
+        if (t && text) cmvs_text_caption(t, text);
+        in->command_known[command] = t && text;
+        return 0;
+    }
+    case 0x10C: {   /* 0x00463f00 -> 0x00450550: put the pen here */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 3, 2));
+        if (t) cmvs_text_pen(t, arg(in, 3, 1), arg(in, 3, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x10D: {   /* 0x00463f50 -> 0x00450580: the reveal's mode and its ms */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 3, 2));
+        if (t) cmvs_text_reveal(t, arg(in, 3, 1), arg(in, 3, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x10E: {   /* 0x00463fa0 -> 0x00428920: the text speed */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 2, 1));
+        if (t) cmvs_text_speed(t, arg(in, 2, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
+    case 0x11A: {   /* 0x004642f0 -> 0x004505b0: the edge colour */
+        cmvs_text *t = cmvs_scene_text_by_id(in->scene, arg(in, 2, 1));
+        if (t) cmvs_text_edge(t, (uint32_t) arg(in, 2, 0));
+        in->command_known[command] = t != NULL;
+        return 0;
+    }
     case 0x119: {
         /*
          * 0x00464250 -> 0x004508c0: how wide the line would be on one line,
@@ -2829,10 +2925,10 @@ int cmvs_interp_capture(cmvs_interp *in, cmvs_save *out, char *err, size_t errle
  * +0xb90[i] outright - so this starts from an empty scene too. Without that a
  * load would leave the boot screen's own objects standing underneath.
  *
- * The 0x380 records (the drawing objects at +0xbe0, read by 0x0045D2D4) are
- * still only CARRIED: they are the text planes' own pen and font state, they
- * have a record shape of their own, and this engine keeps its text in
- * cmvs_text rather than in that object. Nothing here invents them.
+ * The 0x380 records are the TEXT objects, one per entry of the table at
+ * +0xbb0 (0x0045D2D4 makes each one and 0x00451950 fills it). They are still
+ * only CARRIED: what this engine gained here is the table itself, so a script
+ * can address a text object by id; applying a saved one is the next step.
  */
 static void restore_scene(cmvs_interp *in, const cmvs_save *s)
 {

@@ -144,6 +144,22 @@ cmvs_text *cmvs_scene_text(cmvs_scene *s, int layer);
  */
 void cmvs_scene_text_register(cmvs_scene *s, int id, int layer);
 
+/*
+ * The other half of that table, and the one the choices are written in.
+ * Command 0x100 (0x00463850) makes a text object of its own at +0xbb0[id] -
+ * the same 0x164-byte class a layer keeps at its +0x9dc, with its own position
+ * rather than a layer's - and the whole 0x100..0x11a family then addresses it
+ * by that id, exactly as 0x141..0x15d addresses a layer's by layer. A choice
+ * bar is one graphic object with a caption written into a text object made
+ * this way, so without these the bar draws and the words do not.
+ *
+ * 0x100 replaces whatever the entry held, a layer's registration included,
+ * because the original overwrites the pointer outright; 0x101 (0x00463B70)
+ * drops it again.
+ */
+int cmvs_scene_text_create(cmvs_scene *s, int id);
+void cmvs_scene_text_drop_id(cmvs_scene *s, int id);
+
 /* One frame of time for every layer's reveal, so the typewriter runs off
  * the same clock the ten engine timers do. */
 void cmvs_scene_text_tick(cmvs_scene *s, int ms);

@@ -92,11 +92,14 @@ void cmvs_text_colours(cmvs_text *t, uint32_t a, uint32_t b)
     if (!(b & 0xFF000000u)) t->colour2 = b;
 }
 
+void cmvs_text_at(cmvs_text *t, int x, int y) { t->x = x; t->y = y; }
 void cmvs_text_edge(cmvs_text *t, uint32_t edge) { t->edge = edge; }
 void cmvs_text_pen(cmvs_text *t, int x, int y) { t->pen_x = x; t->pen_y = y; }
+void cmvs_text_reveal(cmvs_text *t, int mode, int fade) { t->mode = mode; t->fade = fade; }
+void cmvs_text_speed(cmvs_text *t, int speed) { t->speed = speed; }
 void cmvs_text_show(cmvs_text *t, int visible) { t->visible = visible ? 1 : 0; }
 
-static int append(cmvs_text *t, unsigned code, int x, int y, int cell)
+int cmvs_text_append(cmvs_text *t, unsigned code, int x, int y, int cell)
 {
     cmvs_glyph *g;
     if (t->glyphs == t->capacity) {
@@ -114,8 +117,8 @@ static int append(cmvs_text *t, unsigned code, int x, int y, int cell)
     g->cell = cell;
     g->colour = t->colour;
     g->edge = t->edge;
-    g->start = t->next_start;
-    t->next_start += step_ms(t);
+    g->start = t->instant ? 0 : t->next_start;
+    if (!t->instant) t->next_start += step_ms(t);
     return 1;
 }
 
@@ -130,6 +133,14 @@ static void newline(cmvs_text *t)
 {
     t->pen_x = t->rx;
     t->pen_y += t->size + t->lead;
+}
+
+void cmvs_text_caption(cmvs_text *t, const char *s)
+{
+    if (!t) return;
+    t->instant = 1;
+    cmvs_text_draw(t, s);
+    t->instant = 0;
 }
 
 void cmvs_text_draw(cmvs_text *t, const char *s)
@@ -160,7 +171,7 @@ void cmvs_text_draw(cmvs_text *t, const char *s)
             while (s[q] && s[q] != 0x2F && s[q] != 0x7D) {
                 unsigned code = cmvs_cp932_next(s, &q);
                 if (t->pen_x >= limit) newline(t);
-                append(t, code, t->pen_x, t->pen_y, t->size);
+                cmvs_text_append(t, code, t->pen_x, t->pen_y, t->size);
                 t->pen_x += t->size + t->gap;
             }
             while (s[q] && s[q] != 0x7D) q++;
@@ -171,12 +182,12 @@ void cmvs_text_draw(cmvs_text *t, const char *s)
             unsigned short raw = (unsigned short) ((c << 8) | (unsigned char) s[p + 1]);
             unsigned code = cmvs_cp932_next(s, &p);
             if (t->pen_x >= limit && !(t->kinsoku && hangs(raw))) newline(t);
-            append(t, code, t->pen_x, t->pen_y, t->size);
+            cmvs_text_append(t, code, t->pen_x, t->pen_y, t->size);
             t->pen_x += t->size + t->gap;
             continue;
         }
         if (t->pen_x >= limit) newline(t);
-        append(t, c, t->pen_x, t->pen_y, t->size / 2);
+        cmvs_text_append(t, c, t->pen_x, t->pen_y, t->size / 2);
         p++;
         /* A single-byte character is half a cell wide: 0x00450a96. */
         t->pen_x += t->size / 2 + t->gap;

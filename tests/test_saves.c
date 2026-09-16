@@ -706,6 +706,37 @@ done:
 #define CHOICE_BUDGET 12000    /* frames; it stands at the choice near 6100 */
 #define CHOICE_X      660      /* the middle of the item's 1000 x 64 box */
 #define CHOICE_Y      172
+#define CHOICE_BOX_X  160      /* the hit rectangle itself, command 0x213 */
+#define CHOICE_BOX_Y  140
+#define CHOICE_BOX_W  1000
+#define CHOICE_BOX_H  64
+/*
+ * The caption's own pen, which command 0x10c sets to (448, 178) before 0x10b
+ * writes the words, and the white command 0x107 gives it. The bar art has
+ * white of its own along its top edge and none at all from the pen row down,
+ * so ink there is the CAPTION and nothing else - which is the whole difference
+ * between a choice a reader can read and the empty bar this drew before.
+ */
+#define CHOICE_PEN_Y  178
+#define CHOICE_INK    0xFFFFFFu
+
+/* How many pixels of the caption's colour are under the pen row, inside the
+ * item's hit rectangle. */
+static int caption_ink(const cmvs_session *s)
+{
+    const uint8_t *px = cmvs_session_pixels(s);
+    int w = cmvs_session_width(s), h = cmvs_session_height(s);
+    int x, y, n = 0;
+    if (!px) return 0;
+    for (y = CHOICE_PEN_Y; y < CHOICE_BOX_Y + CHOICE_BOX_H && y < h; y++) {
+        for (x = CHOICE_BOX_X; x < CHOICE_BOX_X + CHOICE_BOX_W && x < w; x++) {
+            const uint8_t *p = px + 4 * ((size_t) y * w + x);
+            uint32_t c = (uint32_t) p[2] | ((uint32_t) p[1] << 8) | ((uint32_t) p[0] << 16);
+            if (c == CHOICE_INK) n++;
+        }
+    }
+    return n;
+}
 
 static void test_choice(const char *dir, const char *game)
 {
@@ -714,6 +745,7 @@ static void test_choice(const char *dir, const char *game)
     uint8_t *reference;
     int reference_size = 0, i, at = 0;
     long last = -1, idle = 0, before = 0;
+    int ink = 0;
 
     printf("the first choice, in %s\n", game);
     snprintf(saves, sizeof saves, "%s/cmvs-choice-test", game_scratch());
@@ -744,6 +776,8 @@ static void test_choice(const char *dir, const char *game)
         if (!at) {
             at = i;
             before = last;
+            ink = caption_ink(s);
+            printf("        %d pixels of caption ink inside the item's hit box\n", ink);
             printf("        the lines stop after %ld of them, at frame %d, in %s\n",
                    before, at, cmvs_session_script(s));
         }
@@ -760,6 +794,7 @@ static void test_choice(const char *dir, const char *game)
            cmvs_session_messages(s), cmvs_session_script(s));
     check(cmvs_session_messages(s) > before,
           "the press on the choice is taken and the story goes on");
+    check(ink > 0, "the caption is DRAWN in the bar, not only written into it");
     cmvs_session_close(s);
 }
 
@@ -778,7 +813,10 @@ int main(int argc, char **argv)
     } else {
         printf("no reference saves given; the container tests need real files\n");
     }
-    if (dir && game) { test_state(dir, game); test_picture(dir, game); test_advance(dir, game); test_choice(dir, game); }
+    if (dir && game) {
+        test_state(dir, game); test_picture(dir, game); test_advance(dir, game);
+        test_choice(dir, game);
+    }
     else printf("no game to save from; the engine round trip needs one\n");
 
     printf("\n%d checks, %d failed\n", checks, failures);

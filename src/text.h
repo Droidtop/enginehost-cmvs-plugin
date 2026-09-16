@@ -53,6 +53,7 @@ typedef struct {
 } cmvs_glyph;
 
 typedef struct {
+    int x, y;               /* +0x04, +0x08: where the object itself sits */
     int rx, ry, rw, rh;     /* the box */
     int size, gap, lead;    /* +0x1c, +0x20, +0x24 */
     int kinsoku;            /* +0x6c: do not start a line with 、。」) */
@@ -65,6 +66,14 @@ typedef struct {
     int clock;              /* ms since the line was cleared */
     int next_start;         /* 0x00450cd0's accumulator, carried between calls */
 
+    /*
+     * 0x00450DC0 lays a caption out without the reveal accumulator at
+     * 0x00450CD0, so its characters are on screen the moment they are written
+     * rather than typed out. It is the same layout otherwise, and this is the
+     * one bit that tells the two apart.
+     */
+    int instant;
+
     cmvs_glyph *glyph;
     int glyphs, capacity;
 } cmvs_text;
@@ -76,11 +85,23 @@ void cmvs_text_free(cmvs_text *t);
  * to the top left of the box. */
 void cmvs_text_clear(cmvs_text *t);
 
+/*
+ * Command 0x102 (0x004503E0): where the text object itself sits, which is a
+ * different thing from its box. A layer's text is moved with the layer
+ * (0x00452750 hands both the same pair); a text object a script made for
+ * itself with 0x100 is placed by this alone.
+ */
+void cmvs_text_at(cmvs_text *t, int x, int y);
+
 void cmvs_text_box(cmvs_text *t, int x, int y, int w, int h);
 void cmvs_text_size(cmvs_text *t, int size, int gap, int lead);
 void cmvs_text_colours(cmvs_text *t, uint32_t a, uint32_t b);
 void cmvs_text_edge(cmvs_text *t, uint32_t edge);
 void cmvs_text_pen(cmvs_text *t, int x, int y);
+/* 0x00450580 (+0x84, +0x88) and 0x00428920 (+0x8c): how a character arrives
+ * and how fast the line is typed. Commands 0x10d and 0x10e. */
+void cmvs_text_reveal(cmvs_text *t, int mode, int fade);
+void cmvs_text_speed(cmvs_text *t, int speed);
 void cmvs_text_show(cmvs_text *t, int visible);
 
 /*
@@ -92,6 +113,19 @@ void cmvs_text_show(cmvs_text *t, int visible);
  * marks the reveal reads and cost no space.
  */
 void cmvs_text_draw(cmvs_text *t, const char *cp932);
+
+/*
+ * Command 0x10b (0x00463EA0 -> 0x00450DC0): the same layout from the same pen,
+ * and no reveal. A choice caption is written once into a text object that
+ * nothing ticks, so a character of it that waited on the typewriter's clock
+ * would never be drawn at all.
+ */
+void cmvs_text_caption(cmvs_text *t, const char *cp932);
+
+/* One laid-out character, at the place the caller worked out. 0x004501B0 is
+ * this: the layout routines call it per character, and so does the reader of a
+ * 0x380 save record, which carries the same descriptor. */
+int cmvs_text_append(cmvs_text *t, unsigned code, int x, int y, int cell);
 
 /*
  * Command 0x112 (0x004509a0): how the string WOULD lay out, without drawing
