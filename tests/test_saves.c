@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "game.h"
 #include "save.h"
 #include "session.h"
 
@@ -544,6 +545,123 @@ static void test_advance(const char *dir, const char *game)
     free(reference);
 }
 
+/*
+ * THE PICTURE A LOAD PUTS BACK.
+ *
+ * A slot save carries the whole scene as the engine's own records, and until
+ * these were applied a load restored the script position and left whatever was
+ * on screen standing: the frame after loading save000.dat was the boot screen's
+ * logo plate with a message window over it, and so was the thumbnail the next
+ * save wrote. What the original does instead is re-create every object from its
+ * record (0x0045DA5E -> 0x00435710 for a 0x700, 0x0045D46B -> 0x00451B80 for a
+ * 0x400), which is what cmvs_scene_restore_object and _restore_layer are.
+ *
+ * The check does not need a screenshot to be honest about it. save000.dat's
+ * record 0x700/29 names bg990a.pb3 - the summer sky the prologue is played in -
+ * at (0, 0), 1280x720, draw order 32, and the game's own archive is where that
+ * image comes from. So: decode bg990a.pb3 out of the game, bucket its colours,
+ * and ask how much of the composed frame lands in those buckets. The scene
+ * covers nearly all of it; the logo plate, which is the frame this same run has
+ * BEFORE the load, covers very little. Both numbers are printed, so a
+ * regression says which way it went rather than only that it went.
+ */
+#define PICTURE_BUCKETS (1 << 15)
+
+static unsigned bucket_of(const uint8_t *bgra)
+{
+    return (unsigned) ((bgra[0] >> 3) << 10 | (bgra[1] >> 3) << 5 | (bgra[2] >> 3));
+}
+
+/* What share of the frame, in tenths of a percent, lands in a colour the
+ * reference image also has. */
+static int coverage(const uint8_t *frame, int w, int h, const uint8_t *seen)
+{
+    long total = (long) w * h, in = 0, i;
+    if (total <= 0) return 0;
+    for (i = 0; i < total; i++) if (seen[bucket_of(frame + 4 * i)]) in++;
+    return (int) (in * 1000 / total);
+}
+
+static void test_picture(const char *dir, const char *game)
+{
+    char err[256] = {0}, path[1024], saves[1024];
+    cmvs_session *s;
+    cmvs_game *g;
+    pb3_image sky;
+    uint8_t *reference, *seen, *before = NULL;
+    int reference_size = 0, i, w, h, was = 0, now = 0;
+    const uint8_t *frame;
+
+    printf("the picture a load puts back, in %s\n", game);
+
+    g = cmvs_game_open(game, err, sizeof err);
+    if (!g) { printf("  --    %s\n", err); return; }
+    if (!cmvs_game_image(g, "bg990a.pb3", &sky, err, sizeof err)) {
+        printf("  --    bg990a.pb3: %s\n", err);
+        cmvs_game_close(g);
+        return;
+    }
+    seen = calloc(PICTURE_BUCKETS, 1);
+    if (!seen) { pb3_free(&sky); cmvs_game_close(g); return; }
+    for (i = 0; i < sky.width * sky.height; i++) seen[bucket_of(sky.pixels + 4 * i)] = 1;
+    pb3_free(&sky);
+    cmvs_game_close(g);
+
+    snprintf(saves, sizeof saves, "%s/cmvs-picture-test", game_scratch());
+    s = cmvs_session_open(game, NULL, NULL, saves, err, sizeof err);
+    if (!s) { printf("  --    %s\n", err); free(seen); return; }
+    for (i = 0; i < 400 && !cmvs_session_save_folder(s); i++)
+        cmvs_session_frame(s, err, sizeof err);
+    if (!cmvs_session_save_folder(s)) { cmvs_session_close(s); free(seen); return; }
+
+    w = cmvs_session_width(s);
+    h = cmvs_session_height(s);
+    frame = cmvs_session_pixels(s);
+    if (frame && w > 0 && h > 0) {
+        before = malloc((size_t) w * h * 4);
+        if (before) memcpy(before, frame, (size_t) w * h * 4);
+        was = coverage(frame, w, h, seen);
+    }
+
+    reference = slurp_from(dir, "save000.dat", &reference_size);
+    if (!reference) { cmvs_session_close(s); free(seen); free(before); return; }
+    snprintf(path, sizeof path, "%s/save000.dat", cmvs_session_save_folder(s));
+    if (!write_out(path, reference, reference_size)) {
+        free(reference); cmvs_session_close(s); free(seen); free(before); return;
+    }
+    free(reference);
+
+    if (!cmvs_session_load_slot(s, 0, err, sizeof err)) {
+        check(0, "the engine loads the user's save000.dat");
+        cmvs_session_close(s); free(seen); free(before); return;
+    }
+    cmvs_session_frame(s, err, sizeof err);
+    frame = cmvs_session_pixels(s);
+    if (!frame) { check(0, "there is a composed frame after the load"); goto done; }
+    now = coverage(frame, w, h, seen);
+
+    printf("        the frame is %d.%d%% the scene's colours after the load,"
+           " and was %d.%d%% before it\n", now / 10, now % 10, was / 10, was % 10);
+    /*
+     * 85.6% as this is written. The rest of the frame is the two display
+     * layers the same save restores over the sky - the toolbar along the top
+     * out of iconwindow.pb3 and the message window out of message01.pb3 - so
+     * the whole screen never reads as the background alone. The logo plate
+     * this replaced scored 0.0%, so the gap between a restored scene and an
+     * unrestored one is the whole range and not a few points.
+     */
+    check(now >= 800, "the frame after the load is the prologue scene");
+    check(was < 500, "and the frame before it was not (it is the boot screen)");
+    check(before && memcmp(before, frame, (size_t) w * h * 4) != 0,
+          "so the load changed what is on screen");
+    check(cmvs_session_drawn(s) > 0, "and the compositor drew the restored items");
+
+done:
+    cmvs_session_close(s);
+    free(seen);
+    free(before);
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : NULL;
@@ -559,7 +677,7 @@ int main(int argc, char **argv)
     } else {
         printf("no reference saves given; the container tests need real files\n");
     }
-    if (dir && game) { test_state(dir, game); test_advance(dir, game); }
+    if (dir && game) { test_state(dir, game); test_picture(dir, game); test_advance(dir, game); }
     else printf("no game to save from; the engine round trip needs one\n");
 
     printf("\n%d checks, %d failed\n", checks, failures);

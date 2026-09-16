@@ -343,6 +343,248 @@ cmvs_text *cmvs_scene_text_by_id(cmvs_scene *s, int id)
 
 void cmvs_scene_font(cmvs_scene *s, cmvs_font *font) { if (s) s->font = font; }
 
+/* ------------------------------------------------------- a load's picture
+ *
+ * 0x00435710 is the engine's own reader for a graphic object, and everything
+ * below is that routine and nothing else. A record is a small fixed head, then
+ * optional TAGGED BLOCKS in a fixed order, then the object's child parts, each
+ * one a record of the same shape. Every block header the routine reads is a
+ * u16 tag and a u32 length, and it only ever tests the tag it is expecting
+ * next - so a block that is not there costs nothing and a block this engine
+ * does not model is stepped over by its own length.
+ *
+ * The head, at 0x0043574D..0x004357C4:
+ *   u16 0xFFFF, u16 version   - present only when the first word is 0xFFFF,
+ *                               which is how an unversioned record (version 0)
+ *                               is told from a versioned one
+ *   i32 +0xc34, i32 +0xc38, i32 +0xc3c
+ *   version >= 1: i32 +0xc1c, i32 +0xc28, i32 +0xc2c
+ *   version >= 3: i32 +0xc44, i32 +0xc48   (the object's extent)
+ * then the blocks 0x740 (+0xc10, the bitmap), 0x741 (+0xc14), 0x745 (+0xc30),
+ * 0x749 (+0xc20) and 0x780 (+0xc18, the draw item), then for version >= 2 an
+ * eleven-dword tail, then the parts.
+ *
+ * +0xc38 is what command 0x215 writes through 0x00432B70, so it is the
+ * object SHOWN flag and it is applied as one.
+ */
+
+static int rd_u16(const uint8_t *d, int len, int at, unsigned *out)
+{
+    if (at < 0 || at + 2 > len) return 0;
+    *out = (unsigned) d[at] | ((unsigned) d[at + 1] << 8);
+    return 1;
+}
+
+static int rd_i32(const uint8_t *d, int len, int at, int32_t *out)
+{
+    if (at < 0 || at + 4 > len) return 0;
+    *out = (int32_t) ((uint32_t) d[at] | ((uint32_t) d[at + 1] << 8)
+                    | ((uint32_t) d[at + 2] << 16) | ((uint32_t) d[at + 3] << 24));
+    return 1;
+}
+
+static float rd_f32(const uint8_t *d, int len, int at)
+{
+    int32_t bits = 0;
+    float v;
+    if (!rd_i32(d, len, at, &bits)) return 0.0f;
+    memcpy(&v, &bits, 4);
+    return v;
+}
+
+/*
+ * The draw item, 0x0041B980. Its head is a u32 version and then TWENTY-TWO
+ * DWORDS copied straight over the item (0x0041B9BD is a rep movsd of 0x16),
+ * which is why every field below is read at the item offset itself rather than
+ * at one of its own. Two of them are not taken from the record: 0x0041B9C4
+ * writes 0x100 into +0x54 unconditionally, and the alpha at +0x44 keeps the
+ * clamp its setter has.
+ *
+ * What follows the dwords - +0x58..+0x68 for version 2 and up, a float at
+ * +0x6c for version 4, and the 0x790/0x791/0x792 sub-objects - is not modelled
+ * by this engine, so it is read past rather than applied. The block own
+ * length is what steps over it.
+ */
+static void restore_item(cmvs_item *it, const uint8_t *d, int len)
+{
+    int32_t v = 0;
+    if (len < 4 + 0x58) return;
+    memset(it, 0, sizeof *it);
+    it->used = 1;
+    it->visible = 1;
+    d += 4;
+    len -= 4;
+    rd_i32(d, len, 0x00, &v); it->kind = v;
+    rd_i32(d, len, 0x04, &v); it->mode = v;
+    rd_i32(d, len, 0x08, &v); it->sx = v;
+    rd_i32(d, len, 0x0C, &v); it->sy = v;
+    rd_i32(d, len, 0x10, &v); it->sw = v;
+    rd_i32(d, len, 0x14, &v); it->sh = v;
+    rd_i32(d, len, 0x18, &v); it->ox = v;
+    rd_i32(d, len, 0x1C, &v); it->oy = v;
+    rd_i32(d, len, 0x20, &v); it->x = v;
+    rd_i32(d, len, 0x24, &v); it->y = v;
+    rd_i32(d, len, 0x28, &v); it->depth = v;
+    it->world.x = rd_f32(d, len, 0x2C);
+    it->world.y = rd_f32(d, len, 0x30);
+    it->world.z = rd_f32(d, len, 0x34);
+    it->world.plane = rd_f32(d, len, 0x3C);
+    it->world.lift = rd_f32(d, len, 0x40);
+    rd_i32(d, len, 0x44, &v); it->alpha = v > 255 ? 255 : (v < 0 ? 0 : v);
+    it->world.scale_x = rd_f32(d, len, 0x48);
+    it->world.scale_y = rd_f32(d, len, 0x4C);
+    it->opacity = 0x100;        /* 0x0041B9C4, not from the record */
+}
+
+/*
+ * The bitmap block, 0x0042E530. Only its NAME is wanted here: the original
+ * reloads the image through 0x0042C110 - the same loader command 0x030 calls -
+ * so a save carries the file name and not the pixels. The name is the first of
+ * two NUL-terminated strings, and where they start is the one thing the block
+ * version changes: 8 below version 2, 0x24 at version 2, and 0x28 from version
+ * 3 up, because version 3 reads one more dword at 0x0042E599 after the
+ * version-2 head at 0x0042E5A4 has already put the cursor at 0x24.
+ */
+static const char *bitmap_name(const uint8_t *d, int len)
+{
+    unsigned ver = 0;
+    int at, i;
+    if (!rd_u16(d, len, 0, &ver)) return NULL;
+    at = ver >= 3 ? 0x28 : (ver == 2 ? 0x24 : 8);
+    if (at >= len) return NULL;
+    for (i = at; i < len; i++) if (!d[i]) return (const char *) d + at;
+    return NULL;
+}
+
+/* One optional tagged block. Answers how many bytes it occupies, or 0 when
+ * the next word is not this tag. */
+static int block(const uint8_t *d, int len, int at, unsigned tag,
+                 const uint8_t **payload, int *payload_len)
+{
+    unsigned t = 0;
+    int32_t n = 0;
+    if (!rd_u16(d, len, at, &t) || t != tag) return 0;
+    if (!rd_i32(d, len, at + 2, &n) || n < 0 || at + 6 + n > len) return 0;
+    *payload = d + at + 6;
+    *payload_len = (int) n;
+    return 6 + (int) n;
+}
+
+static int restore_into(cmvs_scene *s, cmvs_object *o, const uint8_t *d, int len)
+{
+    unsigned first = 0;
+    unsigned ver = 0;
+    int at = 0, step;
+    int32_t shown = 0, ew = 0, eh = 0;
+    const uint8_t *pay = NULL;
+    int paylen = 0;
+
+    if (!rd_u16(d, len, 0, &first)) return 0;
+    if (first == 0xFFFF) {
+        if (!rd_u16(d, len, 2, &ver)) return 0;
+        at = 4;
+    }
+    if (at + 12 > len) return 0;
+    rd_i32(d, len, at + 4, &shown);
+    at += 12;
+    if (ver >= 1) at += 12;
+    if (ver >= 3) {
+        if (!rd_i32(d, len, at, &ew) || !rd_i32(d, len, at + 4, &eh)) return 0;
+        at += 8;
+    }
+    o->ew = ew;
+    o->eh = eh;
+
+    if ((step = block(d, len, at, 0x740, &pay, &paylen)) != 0) {
+        const char *name = bitmap_name(pay, paylen);
+        if (name && *name) {
+            pb3_image img;
+            char err[256];
+            if (cmvs_game_image(s->game, name, &img, err, sizeof err)) {
+                if (o->has_bitmap) pb3_free(&o->bitmap);
+                o->bitmap = img;
+                o->has_bitmap = 1;
+            }
+        }
+        at += step;
+    }
+    /* +0xc14, +0xc30 and +0xc20: a second bitmap, and two objects this engine
+     * has no model for. Stepped over by their own lengths, exactly as an
+     * unknown command is stepped over by its argument count. */
+    if ((step = block(d, len, at, 0x741, &pay, &paylen)) != 0) at += step;
+    if ((step = block(d, len, at, 0x745, &pay, &paylen)) != 0) at += step;
+    if ((step = block(d, len, at, 0x749, &pay, &paylen)) != 0) at += step;
+    if ((step = block(d, len, at, 0x780, &pay, &paylen)) != 0) {
+        restore_item(&o->item, pay, paylen);
+        at += step;
+    }
+    o->item.visible = shown ? 1 : 0;
+    /*
+     * The eleven dwords at 0x004359B5. The original calls 0x00435260 with nine
+     * of them when the first is non-zero; it is zero in every record of the
+     * reference saves, so there is nothing here to apply and the tail is only
+     * stepped over. A record that ever arrives with it set loses whatever
+     * 0x00435260 would have done - that is *unproven*, not implemented.
+     */
+    if (ver >= 2) at += 0x2C;
+
+    for (;;) {
+        unsigned tag = 0, index = 0;
+        int32_t n = 0;
+        if (!rd_u16(d, len, at, &tag) || tag != 0x700) break;
+        if (!rd_u16(d, len, at + 2, &index)) break;
+        if (!rd_i32(d, len, at + 4, &n) || n < 0 || at + 8 + n > len) break;
+        at += 8;
+        if (index < (unsigned) CMVS_PARTS) {
+            object_free(o->part[index]);
+            o->part[index] = object_new();
+            if (o->part[index]) restore_into(s, o->part[index], d + at, (int) n);
+        }
+        at += (int) n;
+    }
+    return 1;
+}
+
+int cmvs_scene_restore_object(cmvs_scene *s, int object, const uint8_t *data, int len)
+{
+    if (!s || !data || len <= 0) return 0;
+    if (object < 0 || object >= CMVS_OBJECTS + CMVS_LAYERS) return 0;
+    object_free(s->object[object]);
+    s->object[object] = object_new();
+    if (!s->object[object]) return 0;
+    if (restore_into(s, s->object[object], data, len)) return 1;
+    object_free(s->object[object]);
+    s->object[object] = NULL;
+    return 0;
+}
+
+/*
+ * A layer record, 0x0045D46B -> 0x00451B80. Its head is the text id and a
+ * version of its own; then come the layer SETTINGS, which 0x00451BFD copies
+ * raw into the layer object (0x270 dwords at version 3) and which are the
+ * engine own in-memory layout rather than anything portable. This engine does
+ * not have that layout and does not pretend to: the block is stepped over by
+ * the length the original itself computes (0x9CC at 0x00451BFF, plus the four
+ * bytes 0x00451CF0 adds), and what is applied is the graphic object behind it,
+ * which is the same 0x00435710 record as a 0x700.
+ */
+int cmvs_scene_restore_layer(cmvs_scene *s, int layer, const uint8_t *data, int len,
+                             int *text_id)
+{
+    unsigned id = 0, ver = 0;
+    int at;
+    if (!s || !data || len <= 0) return 0;
+    if (layer < 0 || layer >= CMVS_LAYERS) return 0;
+    if (!rd_u16(data, len, 0, &id) || !rd_u16(data, len, 2, &ver)) return 0;
+    if (text_id) *text_id = (int) id;
+    /* 0x00451BD3: version 1 and anything else leaves the cursor at 4, versions
+     * 2 and 3 at 0x0c; only version 3 carries the settings block. */
+    if (ver != 3) return 0;
+    at = 0x9CC + 4;
+    if (at >= len) return 0;
+    return cmvs_scene_restore_object(s, CMVS_LAYER_OBJECT(layer), data + at, len - at);
+}
+
 /* ------------------------------------------------------------------ blit */
 
 /*

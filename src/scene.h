@@ -152,6 +152,31 @@ cmvs_text *cmvs_scene_text_by_id(cmvs_scene *s, int id);
 /* The face the glyphs are cut from; the session finds it, see font.h. */
 void cmvs_scene_font(cmvs_scene *s, cmvs_font *font);
 
+/*
+ * A LOAD puts the picture back. The slot save carries every live graphic
+ * object (record 0x700, one per object), every display layer (record 0x400)
+ * and the drawing objects (0x380) as the engine's own serialisations, and
+ * 0x0046FA10's reader re-creates each one from its record instead of replaying
+ * the script that made it. These two are that reader, for the two record
+ * shapes this engine models:
+ *
+ *   0x700 -> 0x0045DA5E: new object into +0x77c[i], then 0x00435710 on it
+ *   0x400 -> 0x0045D46B: new layer into +0xb90[i], then 0x00451B80, which
+ *                        skips the layer's own settings block and calls the
+ *                        same 0x00435710 on the layer's object at +0x9d8
+ *
+ * `text_id` comes back with the word at the head of a layer record, which is
+ * the entry of +0xbb0 that layer's text lives in (0x0045D565) - the same
+ * registration command 0x15d makes while the script runs.
+ *
+ * Both answer 0 when the record is too short or does not have the shape the
+ * original's reader expects. They never invent an object: a record that does
+ * not parse leaves the slot empty rather than half-built.
+ */
+int cmvs_scene_restore_object(cmvs_scene *s, int object, const uint8_t *data, int len);
+int cmvs_scene_restore_layer(cmvs_scene *s, int layer, const uint8_t *data, int len,
+                             int *text_id);
+
 /* What is on screen, for the runner to report without a window. */
 int cmvs_scene_drawn(const cmvs_scene *s);
 

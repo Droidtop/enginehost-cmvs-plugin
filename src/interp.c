@@ -2696,6 +2696,48 @@ int cmvs_interp_capture(cmvs_interp *in, cmvs_save *out, char *err, size_t errle
     return 1;
 }
 
+/*
+ * THE PICTURE A LOAD PUTS BACK.
+ *
+ * A slot save carries the whole scene, object by object, and the original's
+ * loader re-creates every one of them from its record: 0x0045DA5E makes a
+ * fresh graphic object for each 0x700 and fills it through 0x00435710, and
+ * 0x0045D46B does the same for each 0x400 layer through 0x00451B80. Nothing
+ * replays the script that drew them, which is why a load lands on the picture
+ * the save was taken on rather than on whatever the resumed script draws next.
+ *
+ * Before any of that the loader tears the scene down - 0x004702B0 calls
+ * 0x004153A0 around the read and the record handlers overwrite +0x77c[i] and
+ * +0xb90[i] outright - so this starts from an empty scene too. Without that a
+ * load would leave the boot screen's own objects standing underneath.
+ *
+ * The 0x380 records (the drawing objects at +0xbe0, read by 0x0045D2D4) are
+ * still only CARRIED: they are the text planes' own pen and font state, they
+ * have a record shape of their own, and this engine keeps its text in
+ * cmvs_text rather than in that object. Nothing here invents them.
+ */
+static void restore_scene(cmvs_interp *in, const cmvs_save *s)
+{
+    int i;
+
+    if (!in->scene) return;
+
+    for (i = 0; i < CMVS_OBJECTS + CMVS_LAYERS; i++)
+        cmvs_scene_drop(in->scene, i, -1);
+
+    for (i = 0; i < CMVS_OBJECTS; i++) {
+        const cmvs_record *r = cmvs_save_find(s, 0x700, i);
+        if (r && r->len > 0) cmvs_scene_restore_object(in->scene, i, r->data, r->len);
+    }
+    for (i = 0; i < CMVS_LAYERS; i++) {
+        const cmvs_record *r = cmvs_save_find(s, 0x400, i);
+        int id = -1;
+        if (!r || r->len <= 0) continue;
+        if (cmvs_scene_restore_layer(in->scene, i, r->data, r->len, &id) && id >= 0)
+            cmvs_scene_text_register(in->scene, id, i);
+    }
+}
+
 int cmvs_interp_restore(cmvs_interp *in, const cmvs_save *s, char *err, size_t errlen)
 {
     const cmvs_record *r;
@@ -2777,6 +2819,8 @@ int cmvs_interp_restore(cmvs_interp *in, const cmvs_save *s, char *err, size_t e
     if (in->depth < 0 || in->depth >= MAX_DEPTH) in->depth = 0;
     in->running = 1;
     in->alive = 1;
+
+    restore_scene(in, s);
 
     /* Keep the whole list, so a save taken from this state re-emits the
      * records we do not model yet instead of dropping them. */
