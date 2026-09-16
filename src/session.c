@@ -224,6 +224,11 @@ void cmvs_session_budget(cmvs_session *s, long statements_per_frame)
     if (s && statements_per_frame > 0) s->budget = statements_per_frame;
 }
 
+const cmvs_text *cmvs_session_text(const cmvs_session *s, int id)
+{
+    return s ? cmvs_scene_text_by_id(cmvs_interp_scene(s->interp), id) : NULL;
+}
+
 void cmvs_session_report(const cmvs_session *s, void *out)
 {
     if (s) cmvs_interp_report(s->interp, out);

@@ -798,6 +798,99 @@ static void test_choice(const char *dir, const char *game)
     cmvs_session_close(s);
 }
 
+/*
+ * THE 0x380 RECORDS ARE APPLIED, NOT ONLY CARRIED.
+ *
+ * Each one is a text object of the table at +0xbb0 - 0x0045D2D4 makes it and
+ * 0x00451950 reads the payload into it - and in these two saves they are the
+ * message window (id 7, which layer 0's record registers) and the name plate
+ * (id 10, layer 7). The test reads the record out of the file itself, with no
+ * expected numbers written down here, and asks the loaded engine for the same
+ * object: a load that carried the record instead of applying it answers with
+ * the defaults 0x00451EE0 writes and fails every line below.
+ */
+static void test_text_records(const char *dir, const char *game, const char *name)
+{
+    char err[256] = {0}, path[1024], saves[1024], what[256];
+    cmvs_session *sess;
+    uint8_t *file;
+    cmvs_save save;
+    int size = 0, i, applied = 0;
+
+    printf("the 0x380 text records of %s, in %s\n", name, game);
+    file = slurp_from(dir, name, &size);
+    if (!file) { printf("  --    %s: not on this machine\n", name); return; }
+    err[0] = 0;
+    if (!cmvs_save_read(file, size, &save, err, sizeof err)) {
+        free(file); check(0, "the reference save reads"); return;
+    }
+    free(file);
+
+    snprintf(saves, sizeof saves, "%s/cmvs-text-test", game_scratch());
+    sess = cmvs_session_open(game, NULL, NULL, saves, err, sizeof err);
+    if (!sess) { printf("  --    %s\n", err); cmvs_save_free(&save); return; }
+    for (i = 0; i < 400 && !cmvs_session_save_folder(sess); i++)
+        cmvs_session_frame(sess, err, sizeof err);
+    if (!cmvs_session_save_folder(sess)) {
+        cmvs_session_close(sess); cmvs_save_free(&save); return;
+    }
+    snprintf(path, sizeof path, "%s/save000.dat", cmvs_session_save_folder(sess));
+    file = slurp_from(dir, name, &size);
+    if (!file || !write_out(path, file, size)) {
+        free(file); cmvs_session_close(sess); cmvs_save_free(&save); return;
+    }
+    free(file);
+    if (!cmvs_session_load_slot(sess, 0, err, sizeof err)) {
+        check(0, "the engine loads the reference save");
+        cmvs_session_close(sess); cmvs_save_free(&save); return;
+    }
+
+    for (i = 0; i < 12; i++) {
+        const cmvs_record *r = cmvs_save_find(&save, 0x380, i);
+        const cmvs_text *t;
+        const uint8_t *d;
+        int at, w[39], j, ok;
+        if (!r || r->len <= 0) continue;
+        d = r->data;
+        at = 6;
+        while (at < r->len && d[at]) at++;
+        at++;
+        if (((unsigned) d[0] | ((unsigned) d[1] << 8)) >= 2) at += 8;
+        if (at + 39 * 4 > r->len) { check(0, "the record parses"); continue; }
+        for (j = 0; j < 39; j++) w[j] = (int) rd32(d + at + j * 4);
+
+        applied++;
+        t = cmvs_session_text(sess, i);
+        snprintf(what, sizeof what, "%s: text object %d exists after the load", name, i);
+        check(t != NULL, what);
+        if (!t) continue;
+        printf("        id %d: at (%d, %d), box %d x %d at (%d, %d), size %d, colours %06X/%06X\n",
+               i, w[0], w[1], w[4], w[5], w[2], w[3], w[6],
+               (unsigned) w[27] & 0xFFFFFFu, (unsigned) w[28] & 0xFFFFFFu);
+        ok = t->x == w[0] && t->y == w[1]
+          && t->rx == w[2] && t->ry == w[3] && t->rw == w[4] && t->rh == w[5];
+        snprintf(what, sizeof what, "%s: object %d sits and is boxed where the record says", name, i);
+        check(ok, what);
+        ok = t->size == w[6] && t->gap == w[7] && t->lead == w[8]
+          && t->kinsoku == (w[26] != 0);
+        snprintf(what, sizeof what, "%s: object %d has the record's metrics", name, i);
+        check(ok, what);
+        ok = t->colour == (uint32_t) w[27] && t->colour2 == (uint32_t) w[28]
+          && t->edge == (uint32_t) w[30];
+        snprintf(what, sizeof what, "%s: object %d has the record's colours", name, i);
+        check(ok, what);
+        ok = t->mode == w[32] && t->fade == w[33] && t->speed == w[34]
+          && t->visible == (w[35] != 0)
+          && t->pen_x == w[37] && t->pen_y == w[38];
+        snprintf(what, sizeof what, "%s: object %d has the record's reveal and pen", name, i);
+        check(ok, what);
+    }
+    snprintf(what, sizeof what, "%s carries text records at all", name);
+    check(applied > 0, what);
+    cmvs_session_close(sess);
+    cmvs_save_free(&save);
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : NULL;
@@ -815,6 +908,8 @@ int main(int argc, char **argv)
     }
     if (dir && game) {
         test_state(dir, game); test_picture(dir, game); test_advance(dir, game);
+        test_text_records(dir, game, "save000.dat");
+        test_text_records(dir, game, "save002.dat");
         test_choice(dir, game);
     }
     else printf("no game to save from; the engine round trip needs one\n");

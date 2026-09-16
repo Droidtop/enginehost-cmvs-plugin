@@ -575,6 +575,97 @@ static int restore_into(cmvs_scene *s, cmvs_object *o, const uint8_t *d, int len
     return 1;
 }
 
+int cmvs_scene_restore_text(cmvs_scene *s, int id, const uint8_t *data, int len)
+{
+    cmvs_text *t;
+    unsigned ver = 0, count = 0;
+    int at, i, name;
+    int32_t w[39];
+
+    if (!s || !data || len <= 0 || id < 0 || id >= CMVS_TEXT_IDS) return 0;
+    if (!rd_u16(data, len, 0, &ver)) return 0;
+
+    /* The record names its own object: an id no layer has registered is one
+     * the script made with 0x100, and 0x0045D2D4 creates it here too. */
+    t = cmvs_scene_text_by_id(s, id);
+    if (!t) {
+        if (!cmvs_scene_text_create(s, id)) return 0;
+        t = cmvs_scene_text_by_id(s, id);
+        if (!t) return 0;
+    }
+
+    /* u16 version, u32, then the font name, which this engine does not choose
+     * per object - the session finds one face and cuts every glyph from it. */
+    name = 6;
+    while (name < len && data[name]) name++;
+    if (name >= len) return 0;
+    at = name + 1;
+    if (ver >= 2) at += 8;
+    for (i = 0; i < 39; i++)
+        if (!rd_i32(data, len, at + i * 4, &w[i])) return 0;
+    at += 0x9C + 0x94;
+    if (!rd_u16(data, len, at, &count)) return 0;
+    at += 2;
+
+    /* Offset 0x04 + 4i of the original's object; the names are text.h's. */
+    cmvs_text_clear(t);
+    t->x = w[0];  t->y = w[1];
+    t->rx = w[2]; t->ry = w[3]; t->rw = w[4]; t->rh = w[5];
+    t->size = w[6]; t->gap = w[7]; t->lead = w[8];
+    t->kinsoku = w[26] != 0;
+    t->colour = (uint32_t) w[27];
+    t->colour2 = (uint32_t) w[28];
+    t->edge = (uint32_t) w[30];
+    t->mode = w[32]; t->fade = w[33];
+    t->speed = w[34];
+    t->visible = w[35] != 0;
+    t->pen_x = w[37]; t->pen_y = w[38];
+
+    /*
+     * The glyphs the line already holds, each the ten-dword descriptor
+     * 0x004501B0 takes, behind the ordinal that routine writes back into it.
+     * The descriptor is filled in 0x00450DC0 before the loop and per character
+     * inside it, and that is where these names come from:
+     *
+     *   d0 high half  the cp932 character   (0x00450EB3)
+     *   d2            the colour mode, +0x80 (0x00450E3A / 0x00450E43)
+     *   d3 d4         the pen, +0x98 and +0x9c (0x00450EDE, 0x00450FA5)
+     *   d5            the em size, +0x1c    (0x00450E00)
+     *   d6 d7         the two colours, +0x70 and +0x74 (0x00450DFA)
+     *   d8            +0x78, or the caller's own (0x00450E59)
+     *   d9            the edge colour, +0x7c (0x00450DF7)
+     *
+     * d0's low half and d1 are *unproven*; nothing this engine draws with
+     * reads them. They are on screen in the save, so they are on screen here:
+     * the reveal clock is not restarted for them.
+     */
+    for (i = 0; i < (int) count; i++) {
+        int32_t d[10];
+        unsigned code;
+        int j, ok = 1;
+        for (j = 0; j < 10; j++)
+            if (!rd_i32(data, len, at + 4 + j * 4, &d[j])) { ok = 0; break; }
+        if (!ok) break;
+        code = ((uint32_t) d[0] >> 16) & 0xFFFFu;
+        if (code) {
+            uint32_t was = t->colour, edge = t->edge;
+            int size = t->size;
+            t->colour = (uint32_t) d[6];
+            t->edge = (uint32_t) d[9];
+            t->size = d[5] > 0 ? d[5] : t->size;
+            t->instant = 1;
+            cmvs_text_append(t, code, d[3], d[4],
+                             code > 0xFF ? t->size : t->size / 2);
+            t->instant = 0;
+            t->colour = was;
+            t->edge = edge;
+            t->size = size;
+        }
+        at += 0x2C;
+    }
+    return 1;
+}
+
 int cmvs_scene_restore_object(cmvs_scene *s, int object, const uint8_t *data, int len)
 {
     if (!s || !data || len <= 0) return 0;

@@ -2926,9 +2926,11 @@ int cmvs_interp_capture(cmvs_interp *in, cmvs_save *out, char *err, size_t errle
  * load would leave the boot screen's own objects standing underneath.
  *
  * The 0x380 records are the TEXT objects, one per entry of the table at
- * +0xbb0 (0x0045D2D4 makes each one and 0x00451950 fills it). They are still
- * only CARRIED: what this engine gained here is the table itself, so a script
- * can address a text object by id; applying a saved one is the next step.
+ * +0xbb0: 0x0045D2D4 makes each one and 0x00451950 fills it. They are applied
+ * after the layers, because a layer record is what says which entry that
+ * layer's text lives in (0x0045D565) - in save000.dat layer 0 is text 7 and
+ * layer 7 is text 10 - and applying them first would write the box, the
+ * colours and the pen into an object nothing yet points at.
  */
 static void restore_scene(cmvs_interp *in, const cmvs_save *s)
 {
@@ -2949,6 +2951,10 @@ static void restore_scene(cmvs_interp *in, const cmvs_save *s)
         if (!r || r->len <= 0) continue;
         if (cmvs_scene_restore_layer(in->scene, i, r->data, r->len, &id) && id >= 0)
             cmvs_scene_text_register(in->scene, id, i);
+    }
+    for (i = 0; i < CMVS_TEXT_IDS; i++) {
+        const cmvs_record *r = cmvs_save_find(s, 0x380, i);
+        if (r && r->len > 0) cmvs_scene_restore_text(in->scene, i, r->data, r->len);
     }
 }
 

@@ -13,6 +13,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "text.h"
+
 typedef struct cmvs_session cmvs_session;
 
 /*
@@ -115,6 +117,13 @@ int cmvs_session_load_slot(cmvs_session *s, int slot, char *err, size_t errlen);
 /* The folder the saves are actually being kept in, once the boot script has
  * named it, or NULL. A console run's log needs this to be readable. */
 const char *cmvs_session_save_folder(const cmvs_session *s);
+
+/*
+ * The text object at +0xbb0[id] - the one command 0x112 measures by and the
+ * one a 0x380 save record fills. A test needs it to say that a load APPLIED
+ * those records rather than carrying them. NULL when the entry holds nothing.
+ */
+const cmvs_text *cmvs_session_text(const cmvs_session *s, int id);
 
 /* Development handles: statement tracing and the command report. */
 void cmvs_session_trace(cmvs_session *s, int on);

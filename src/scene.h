@@ -189,6 +189,29 @@ void cmvs_scene_font(cmvs_scene *s, cmvs_font *font);
  * original's reader expects. They never invent an object: a record that does
  * not parse leaves the slot empty rather than half-built.
  */
+/*
+ * A 0x380 record: one entry of the table at +0xbb0, which is a text object.
+ * 0x0045D2D4 is the loader's handler for it - it makes the object, hands the
+ * font name and the two reference numbers to 0x00420840, and then 0x00451950
+ * reads the rest of the payload into it. This is that reader, for the fields
+ * this engine's text object has:
+ *
+ *   u16 version; u32 (obj+0x138); char font[]; [u32 u32 when version >= 2]
+ *   0x27 dwords  obj+0x04 .. obj+0xa0   - the position, box, size and colours
+ *   0x25 dwords  obj+0xa4 .. obj+0x138  - the ruby and metrics half
+ *   u16 count; count * 0x2c             - the glyphs already on the line
+ *
+ * The glyph entry is the ten-dword descriptor 0x004501B0 takes, prefixed by
+ * the ordinal that routine writes back into it. Three of the ten are pinned
+ * down - the character in the high half of the first, and the pen in the
+ * fourth and fifth (0x00450EDE and 0x00450FA5 fill them from +0x98 and +0x9c
+ * before the call) - and those are the three this engine keeps per glyph; the
+ * other seven are *unproven* and are carried in the saved record rather than
+ * invented. Both reference saves hold zero glyphs, so nothing here is checked
+ * against a file that has any.
+ */
+int cmvs_scene_restore_text(cmvs_scene *s, int id, const uint8_t *data, int len);
+
 int cmvs_scene_restore_object(cmvs_scene *s, int object, const uint8_t *data, int len);
 int cmvs_scene_restore_layer(cmvs_scene *s, int layer, const uint8_t *data, int len,
                              int *text_id);
