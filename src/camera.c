@@ -88,7 +88,26 @@ int cmvs_camera_project(const cmvs_camera *c, const cmvs_placement *p,
     out->x = kx * scale * (p->x - c->x) + c->centre_x;
     out->y = ky * (scale * (c->y - p->y) + p->lift) + c->centre_y
              + (p->plane - dz) * c->lift;
-    out->scale_x = p->scale_x * scale;
-    out->scale_y = p->scale_y * scale;
+    /*
+     * 0x00443eda, and it is the item's own scale times the perspective one
+     * SQUARED, not once. The routine keeps scale * scale in [ebp+0xc] from
+     * 0x00443e31 - `fld st(0)` then `fmul st(0), st(0)` - and multiplies both
+     * of the item's scales by that, never by the single factor.
+     *
+     * The two agree exactly whenever the item stands at the depth it declares,
+     * because then plane / dz is 1, and every ChronoClock scene read before
+     * this one did stand there: the title, the prologue and the first rooftop
+     * all place their camera at z = 0 with the background at z = 70 and a
+     * plane of 70. So this made no difference to any of them - the reference
+     * renders beside BRIEF.md are byte for byte what they were - and all the
+     * difference in the world to a scene whose camera has moved in, where
+     * ONCE leaves the background too small to cover the frame it has been
+     * pushed across. snky02.ps3's rooftop pool is that scene: camera at
+     * (-63, 36, 25), background at (0, 36, 70) anchored on its own centre,
+     * so the anchor lands 1524 px right of the middle and only a bitmap drawn
+     * at the squared scale is still wide enough to reach back over it.
+     */
+    out->scale_x = p->scale_x * scale * scale;
+    out->scale_y = p->scale_y * scale * scale;
     return 1;
 }
