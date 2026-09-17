@@ -92,6 +92,16 @@ int cmvs_scene_bitmap_file(cmvs_scene *s, int object, int part,
                            const uint8_t *file, int size);
 
 /*
+ * Command 0x308 gives an object a MOVIE FRAME instead of a picture out of an
+ * archive. The pixels are already BGRA top-down, so the object wears a copy of
+ * them directly, and a frame whose size matches the one already there re-uses
+ * that buffer rather than freeing and allocating 3.5 MB twenty-four times a
+ * second.
+ */
+int cmvs_scene_bitmap_pixels(cmvs_scene *s, int object, int part,
+                             int w, int h, const uint8_t *bgra, int stride);
+
+/*
  * A blank plate of that size, which is what the LOAD screen draws for a slot
  * that has no thumbnail: 0x0046c2ea makes one at the size command 0x2b0 set
  * and hands it to 0x00434060 instead of the decoded picture.

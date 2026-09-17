@@ -122,6 +122,16 @@ int cmvs_interp_system_restore(cmvs_interp *in, const cmvs_system *s,
 long cmvs_interp_messages(const cmvs_interp *in);
 int cmvs_interp_message(const cmvs_interp *in, char *out, size_t outlen);
 
+/*
+ * What a movie player is doing: the graphic object it draws into, the frame it
+ * last drew, how many frames the movie has and whether the clock is running.
+ * Answers 0 when the slot holds no movie. Nothing in the engine reads it; it is
+ * for a test and for a log line that says whether a scene's background is a
+ * movie and which frame of it is on screen.
+ */
+int cmvs_interp_movie(const cmvs_interp *in, int slot, int *object, int *frame,
+                      int *frames, int *playing);
+
 /* What the run did, for the desktop runner to print. */
 long cmvs_interp_statements(const cmvs_interp *in);
 int cmvs_interp_unimplemented(const cmvs_interp *in, int *distinct);

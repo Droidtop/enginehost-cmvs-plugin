@@ -142,4 +142,12 @@ int cmvs_session_switch(const cmvs_session *s, int which);
 int cmvs_session_icon_events(const cmvs_session *s, int *last_icon, int *last_layer);
 long cmvs_session_command_calls(const cmvs_session *s, int command, int *known);
 
+/*
+ * A movie player, without a screen: which graphic object command 0x308 gave it,
+ * which frame it last drew, how long the movie is and whether its clock is
+ * running. Answers 0 when the slot is empty. See cmvs_interp_movie.
+ */
+int cmvs_session_movie(const cmvs_session *s, int slot, int *object, int *frame,
+                       int *frames, int *playing);
+
 #endif

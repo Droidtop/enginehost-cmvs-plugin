@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "cmv.h"
 #include "commands.h"
 #include "menu.h"
 #include "scene.h"
@@ -36,6 +37,44 @@ typedef struct {
     char name[128];
     int32_t vars[SCRIPT_VARS / 4];
 } cmvs_slot;
+
+/*
+ * A MOVIE PLAYER, the 0x154-byte object 0x00430bc0 builds. Command 0x308 puts
+ * one in +0xc60[slot] and there are three slots, which is what every one of the
+ * commands checks with `cmp slot, 2 / ja`.
+ *
+ * The fields carry the original's own offsets. The per-track triple at +0x34 is
+ * what 0x00430d10 writes and what the frame step at 0x00431c73 reads; the
+ * original indexes it with the track number the script gives and checks
+ * nothing, so a bound is the one thing here that is not its.
+ */
+#define CMVS_MOVIES        3
+#define CMVS_MOVIE_TRACKS  16
+/* 0x00431a3d: the movie's own sound goes on effect bank slot + 2, at volume
+ * 0x100, which is the top of the engine's own 0..255 range. */
+#define CMVS_MOVIE_BANK(slot) ((slot) + 2)
+#define CMVS_MOVIE_VOLUME 255
+
+typedef struct {
+    uint8_t *file;        /* the .cmv, owned */
+    int file_size;
+    cmv_movie *movie;
+    int object;           /* +0xf8: the graphic object 0x308 named */
+    int mode;             /* +0x18, command 0x30d: which frame clock steps it */
+    int hold;             /* +0x20, the frame mode 0x0a will not step past */
+    int reader;           /* +0x1c, 0x308's own trailing 2 */
+    int playing;          /* +0x2c */
+    int paused;           /* +0x30 */
+    int track;            /* +0x24 */
+    int queued;           /* +0x28: a track change waiting for this track to end */
+    int loop[CMVS_MOVIE_TRACKS];    /* +0x34 + 12n */
+    int first[CMVS_MOVIE_TRACKS];   /* +0x38 + 12n */
+    int last[CMVS_MOVIE_TRACKS];    /* +0x3c + 12n */
+    int frame;            /* +0x100 */
+    int drawn;            /* +0x110, the frame last drawn, -1 out of 0x004319a1 */
+    long clock;           /* +0x108, the milliseconds not yet spent on a frame */
+    int sounding;         /* the container carried a track and it was started */
+} cmvs_movie_slot;
 
 struct cmvs_interp {
     cmvs_game *game;
@@ -179,6 +218,13 @@ struct cmvs_interp {
     cmvs_save image;
     int have_image;
 
+    /*
+     * The three movie players at +0xc60. Command 0x308 makes one, 0x309 starts
+     * a track on it, 0x30a frees it, 0x30b and 0x30c let it run and stop it,
+     * and the frame clock at 0x00431bfa steps it once a frame.
+     */
+    cmvs_movie_slot movie[CMVS_MOVIES];
+
     int running;       /* still executing this frame */
     int alive;         /* the script has not run off its end */
     int trace;
@@ -190,6 +236,148 @@ struct cmvs_interp {
 static void fail(char *err, size_t errlen, const char *msg)
 {
     if (err && errlen) snprintf(err, errlen, "%s", msg);
+}
+
+/* ------------------------------------------------------------------ movies */
+
+/*
+ * 0x0046e0d0 and the head of 0x0046dcf0: the player is destroyed (0x00431290)
+ * and the pointer at +0xc60[slot] cleared. The file goes with it because this
+ * engine holds the whole .cmv in memory rather than streaming it the way
+ * 0x00431fe0 does through a 1 MB window - the movies in video.cpz are three
+ * megabytes and they come out of an archive entry that is decrypted whole
+ * anyway.
+ */
+static void movie_drop(cmvs_interp *in, int slot)
+{
+    if (slot < 0 || slot >= CMVS_MOVIES) return;
+    if (in->movie[slot].sounding)
+        cmvs_audio_stop(in->audio, CMVS_SOUND_EFFECT, CMVS_MOVIE_BANK(slot), 0);
+    cmv_close(in->movie[slot].movie);
+    free(in->movie[slot].file);
+    memset(&in->movie[slot], 0, sizeof in->movie[slot]);
+    in->movie[slot].object = -1;
+    in->movie[slot].drawn = -1;
+    in->movie[slot].queued = -1;   /* 0x004319fc */
+}
+
+/*
+ * 0x00431760: a frame is refused outright when it is past the end of the movie,
+ * and otherwise decoded with a flag saying whether it FOLLOWS the frame last
+ * drawn. That flag is the one the decoder needs: a frame's own mask may leave
+ * macroblocks holding the previous frame's pixels, and it may only do that when
+ * the previous frame really is the one on the surface.
+ */
+static void movie_show(cmvs_interp *in, int slot, int frame)
+{
+    cmvs_movie_slot *p = &in->movie[slot];
+    char err[256] = "";
+    if (!p->movie) return;
+    if (frame < 0 || frame >= cmv_frames(p->movie)) return;
+    if (!cmv_frame(p->movie, frame, frame > 0 && frame - 1 == p->drawn, err, sizeof err)) {
+        if (in->trace) fprintf(stderr, "cmv: frame %d: %s\n", frame, err);
+        return;
+    }
+    p->drawn = frame;
+    cmvs_scene_bitmap_pixels(in->scene, p->object, -1,
+                             cmv_width(p->movie), cmv_height(p->movie),
+                             cmv_pixels(p->movie), cmv_stride(p->movie));
+}
+
+/*
+ * 0x00431a90, the player's per-frame step, once per engine frame.
+ *
+ * The first two tests are the player's own switches - +0x30 paused, +0x2c
+ * running - and then +0x18, the field command 0x30d writes, picks WHICH frame
+ * clock steps it. There are three and the original refuses any other value:
+ *
+ *   0    0x00431bfa, the wall clock, which is what a player opens on and the
+ *        only one ChronoClock ever uses (it never calls 0x30d at all);
+ *   0x0a 0x00431b33, the same clock with two differences: it will not step past
+ *        the frame at +0x20, and it redraws only when the frame really moved;
+ *   0x0f 0x00431ac7, which does not use a clock: it asks the sound subsystem
+ *        for the PLAY CURSOR of effect bank 0x0b (0x004755e0) and computes the
+ *        frame from it, so the picture follows the track rather than the other
+ *        way about. That one is NOT transcribed here, because this engine's
+ *        mixer has no play-cursor accessor and no game here reaches the mode to
+ *        check a reading against; a player in it holds its frame.
+ *
+ * The clock itself: elapsed time capped at a second (0x00431c07), added to the
+ * player's own leftover and turned into a whole number of frame steps, the
+ * leftover keeping the remainder so that a 24 fps movie on a 62.5 fps engine
+ * does not drift. Each step walks one frame forward, and at the last frame of
+ * the track the movie takes up a queued track, goes back to the track's first
+ * frame or stops where it is. The frame is then drawn whether or not it moved,
+ * exactly as 0x00431cfa does.
+ */
+static void movie_tick(cmvs_interp *in)
+{
+    int slot;
+    for (slot = 0; slot < CMVS_MOVIES; slot++) {
+        cmvs_movie_slot *p = &in->movie[slot];
+        long dt = in->frame_ms, steps;
+        int i, fps, step, was;
+        /* 0x00431a97 and 0x00431aa6, in that order. */
+        if (!p->movie || p->paused || !p->playing) continue;
+        if (p->mode != 0 && p->mode != 0x0a) continue;
+        if (dt > 1000) dt = 1000;
+        p->clock += dt;
+        fps = cmv_fps(p->movie);
+        step = cmv_step(p->movie);
+        steps = p->clock * fps / 1000 / step;
+        /* 0x00431c47: no whole step, no redraw. */
+        if (steps <= 0) continue;
+        p->clock -= steps * step * 1000 / fps;
+        was = p->frame;
+        if (p->mode == 0x0a) {
+            /*
+             * 0x00431bb0. No tracks, no queue and no loop: it walks to the
+             * track's last frame and stops the player there, and it holds at
+             * +0x20 if something set one. 0x00431be1 then redraws only when the
+             * frame moved.
+             */
+            int t = p->track;
+            if (t < 0 || t >= CMVS_MOVIE_TRACKS) continue;
+            for (i = 0; i < steps; i++) {
+                if (p->frame >= p->last[t]) { p->paused = 1; p->playing = 0; break; }
+                if (p->hold != 0 && p->frame == p->hold) continue;
+                p->frame++;
+            }
+            if (p->frame != was) movie_show(in, slot, p->frame);
+            continue;
+        }
+        for (i = 0; i < steps; i++) {
+            int t = p->track, q;
+            if (t < 0 || t >= CMVS_MOVIE_TRACKS) break;
+            /* 0x00431c80: inside the track, one frame on. */
+            if (p->frame < p->last[t]) { p->frame++; continue; }
+            q = p->queued;
+            if (q < 0 || q >= CMVS_MOVIE_TRACKS) {
+                /* 0x00431c99: the end of the track with nothing queued. */
+                if (p->loop[t]) { p->frame = p->first[t]; continue; }
+                /*
+                 * 0x00431cec. The original keeps walking its counter with both
+                 * flags down, which reaches this same branch every time and
+                 * writes the same two zeroes; leaving the loop says it once.
+                 */
+                p->paused = 1;
+                p->playing = 0;
+                break;
+            }
+            /*
+             * 0x00431cae: the track command 0x309 queued while this one was
+             * still running takes over here, and only here. Its first frame of
+             * -1 means "wherever the movie already is", and a first frame that
+             * is where the movie already is steps on rather than standing
+             * still, so a queued track never repeats the frame on screen.
+             */
+            p->track = q;
+            if (p->first[q] == -1 || p->first[q] == p->frame) p->frame++;
+            else p->frame = p->first[q];
+            p->queued = -1;
+        }
+        movie_show(in, slot, p->frame);
+    }
 }
 
 cmvs_interp *cmvs_interp_new(cmvs_game *game)
@@ -219,6 +407,7 @@ void cmvs_interp_free(cmvs_interp *in)
     if (!in) return;
     for (i = 0; i < MAX_SLOTS; i++)
         if (in->slot[i].loaded) cmvs_script_close(&in->slot[i].script);
+    for (i = 0; i < CMVS_MOVIES; i++) movie_drop(in, i);
     cmvs_save_free(&in->image);
     cmvs_audio_free(in->audio);
     cmvs_menus_free(in->menus);
@@ -235,6 +424,23 @@ int cmvs_interp_menu_events(const cmvs_interp *in, int *last_item)
 {
     if (last_item) *last_item = in ? in->menu_last : -1;
     return in ? in->menu_events : 0;
+}
+
+int cmvs_interp_movie(const cmvs_interp *in, int slot, int *object, int *frame,
+                      int *frames, int *playing)
+{
+    const cmvs_movie_slot *p;
+    if (object) *object = -1;
+    if (frame) *frame = -1;
+    if (frames) *frames = 0;
+    if (playing) *playing = 0;
+    if (!in || slot < 0 || slot >= CMVS_MOVIES || !in->movie[slot].movie) return 0;
+    p = &in->movie[slot];
+    if (object) *object = p->object;
+    if (frame) *frame = p->drawn;
+    if (frames) *frames = cmv_frames(p->movie);
+    if (playing) *playing = p->playing && !p->paused;
+    return 1;
 }
 
 long cmvs_interp_statements(const cmvs_interp *in) { return in->statements; }
@@ -1763,6 +1969,193 @@ static int command_builtin(cmvs_interp *in, int command)
         in->sys[0] = in->input.have_pointer ? 1 : 0;
         in->command_known[command] = 1;
         return 0;
+    /*
+     * THE MOVIE FAMILY, 0x308 to 0x30d. A .cmv is CMVS's own video codec and
+     * cmv.c decodes it; these six are the player around it, and they are the
+     * only way a background can be a movie rather than a still.
+     *
+     * snky02.ps3 sets one scene's background with
+     *
+     *     0x308(0, 256, "bg350a.cmv", 28, 0)
+     *     ... the same item setters every other background gets ...
+     *     0x309(1, -1, 0, 0, 0)
+     *
+     * instead of the usual 0x021 / 0x020 / 0x030. Without 0x308 object 28 was
+     * never made again, so every setter after it acted on nothing and the scene
+     * had no background at all for fifty message lines.
+     */
+    case 0x308:     /* 0x0046dcf0, with the player's mode fixed at 2 */
+    case 0x30E: {   /* 0x0046dea0, which is the same command with that mode as
+                     * its sixth argument. The two routines are instruction for
+                     * instruction the same but for the one push at 0x0046de36,
+                     * and the mode ends up at the player's +0x1c, whose only
+                     * reader is 0x00431a50: a mode of 3 starts the container's
+                     * own second reader (0x00431e80). Nothing in this engine
+                     * streams, so the two commands do the same work here and
+                     * the mode is recorded rather than acted on. ChronoClock
+                     * calls 0x308 328 times and 0x30E never. */
+        int n = command == 0x308 ? 5 : 6;
+        int slot = arg(in, n, n - 1), object = arg(in, n, n - 2);
+        const char *name = string_text(in, arg(in, n, n - 3));
+        /*
+         * The FIRST argument is track 0's first frame (0x00431a09 writes it to
+         * +0x38). The SECOND is read by no branch of the original - 0x0046dd26
+         * takes the string, the object and the slot and leaves it where it is -
+         * so it is not read here either.
+         */
+        int first = arg(in, n, 0);
+        int reader = command == 0x308 ? 2 : arg(in, n, 1);
+        in->command_known[command] = 1;
+        if (slot < 0 || slot >= CMVS_MOVIES) return 0;
+        movie_drop(in, slot);
+        cmvs_scene_drop(in->scene, object, -1);
+        cmvs_scene_object(in->scene, object);
+        if (name && *name) {
+            char why[256] = "";
+            int size = 0;
+            uint8_t *file = cmvs_game_data(in->game, name, &size, why, sizeof why);
+            cmv_movie *m = file ? cmv_open(file, size, why, sizeof why) : NULL;
+            if (!m) {
+                free(file);
+                if (in->trace) fprintf(stderr, "cmv: %s: %s\n", name, why);
+                return 0;
+            }
+            in->movie[slot].file = file;
+            in->movie[slot].file_size = size;
+            in->movie[slot].movie = m;
+            in->movie[slot].object = object;
+            in->movie[slot].reader = reader;
+            in->movie[slot].drawn = -1;
+            /*
+             * 0x004319b7 and the three calls after it, and they are the reason
+             * the scene stayed black with the command in place but this part
+             * missing: the movie gives the object A PICTURE of its own size
+             * (0x004341e0), and then, IF THE OBJECT HAS NO DRAW ITEM
+             * (0x00433300 answers 0, which a freshly made object always does),
+             * it makes one (0x00434970) and sets its source rectangle to the
+             * whole picture (0x00433310). A still background is given its item
+             * by the script's own 0x040; the movie scene in snky02.ps3 never
+             * calls 0x040, because the player does it.
+             */
+            cmvs_scene_bitmap_blank(in->scene, object, -1,
+                                    cmv_width(m), cmv_height(m));
+            cmvs_scene_item(in->scene, object, -1);
+            cmvs_scene_source(in->scene, object, -1, 0, 0, cmv_width(m), cmv_height(m));
+            if (!cmv_intra(m, why, sizeof why)) {
+                if (in->trace) fprintf(stderr, "cmv: %s: %s\n", name, why);
+                movie_drop(in, slot);
+                return 0;
+            }
+            /*
+             * 0x00431a03 to 0x00431a1a: the player opens on TRACK 0, whose
+             * first frame is the command's own first argument, whose last is
+             * the last frame the movie has, which does not loop, with no track
+             * change queued and the clock stopped. A movie therefore shows its
+             * first frame and stands there until 0x309 starts a track.
+             */
+            in->movie[slot].track = 0;
+            in->movie[slot].queued = -1;
+            in->movie[slot].loop[0] = 0;
+            in->movie[slot].first[0] = first;
+            in->movie[slot].last[0] = cmv_frames(m) - 1;
+            /*
+             * 0x00431a20 and 0x00431a41: if the container carries a sound
+             * track - the last entry of its own frame table, which the header's
+             * +0x28 says is there - the player hands it to the EFFECT subsystem
+             * on bank slot + 2 the moment the movie opens, at full volume and
+             * not looped. The frame clock and the track run independently after
+             * that, exactly as they do in the original.
+             */
+            {
+                const uint8_t *track = NULL;
+                int track_size = 0;
+                if (cmv_audio(m, &track, &track_size)
+                    && cmvs_audio_play_memory(in->audio, CMVS_SOUND_EFFECT,
+                                              CMVS_MOVIE_BANK(slot), track,
+                                              track_size, 0, CMVS_MOVIE_VOLUME))
+                    in->movie[slot].sounding = 1;
+            }
+            /* 0x00431a65: the movie shows a frame the moment it opens, so the
+             * setters that follow have a picture to size themselves from. */
+            movie_show(in, slot, 0);
+        }
+        return 0;
+    }
+    case 0x309: {
+        /*
+         * 0x0046e050 -> 0x00430d10. The track's loop flag goes to +0x34 + 12n,
+         * its first frame to +0x38 and its last to +0x3c, where -1 means the
+         * last frame the movie has. What happens next depends on whether the
+         * player is ALREADY RUNNING (0x00430d4e): if it is not, this track
+         * becomes the current one, the clock re-bases and the player runs; if
+         * it is, the track is QUEUED at +0x28 and the player carries on, and
+         * the frame step takes it up when the running track reaches its end.
+         * Neither path jumps to the first frame.
+         */
+        int slot = arg(in, 5, 4), track = arg(in, 5, 3);
+        int first = arg(in, 5, 2), last = arg(in, 5, 1), loop = arg(in, 5, 0);
+        cmvs_movie_slot *p;
+        in->command_known[command] = 1;
+        if (slot < 0 || slot >= CMVS_MOVIES) return 0;
+        p = &in->movie[slot];
+        if (!p->movie) return 0;
+        if (track < 0 || track >= CMVS_MOVIE_TRACKS) return 0;
+        p->loop[track] = loop != 0;
+        p->first[track] = first;
+        p->last[track] = last != -1 ? last : cmv_frames(p->movie) - 1;
+        if (p->playing) { p->queued = track; return 0; }
+        p->track = track;
+        p->queued = -1;
+        p->playing = 1;
+        p->clock = 0;
+        return 0;
+    }
+    case 0x30A:     /* 0x0046e0d0: the player is destroyed and the slot empty */
+        movie_drop(in, arg(in, 1, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x30B: {   /* 0x0046e130 -> 0x00430c90: running again, clock re-based */
+        int slot = arg(in, 1, 0);
+        in->command_known[command] = 1;
+        if (slot < 0 || slot >= CMVS_MOVIES || !in->movie[slot].movie) return 0;
+        if (in->movie[slot].playing) in->movie[slot].clock = 0;
+        in->movie[slot].paused = 0;
+        return 0;
+    }
+    case 0x30C: {   /* 0x0046e170 -> 0x00430c80: +0x30, and the frame step stops */
+        int slot = arg(in, 1, 0);
+        in->command_known[command] = 1;
+        if (slot < 0 || slot >= CMVS_MOVIES || !in->movie[slot].movie) return 0;
+        in->movie[slot].paused = 1;
+        return 0;
+    }
+    case 0x30D: {   /* 0x0046e1b0 -> 0x00430cc0: the player's mode at +0x18 */
+        int slot = arg(in, 2, 1);
+        in->command_known[command] = 1;
+        if (slot < 0 || slot >= CMVS_MOVIES || !in->movie[slot].movie) return 0;
+        in->movie[slot].mode = arg(in, 2, 0);
+        return 0;
+    }
+    case 0x30F: {
+        /*
+         * 0x0046e230 -> 0x00430ce0, the one QUESTION the movie family answers:
+         * sys[0] is the track the player is on (+0x24) and sys[4] the frame it
+         * is showing (+0x100). An empty slot answers -1 and leaves the frame at
+         * the zero 0x0046e243 put in the local, and a slot number out of range
+         * answers neither and raises the script's own error bit instead.
+         */
+        int slot = arg(in, 1, 0);
+        in->command_known[command] = 1;
+        if (slot < 0 || slot >= CMVS_MOVIES) return 0;
+        if (in->movie[slot].movie) {
+            in->sys[0] = in->movie[slot].track;
+            in->sys[4] = in->movie[slot].frame;
+        } else {
+            in->sys[0] = -1;
+            in->sys[4] = 0;
+        }
+        return 0;
+    }
     case 0x0CA: {
         /*
          * 0x00465af0: is the pointer inside a rectangle. It reads the pointer
@@ -3009,6 +3402,10 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
      * elapsed milliseconds (0x00406a70) before it decides how much of the line
      * is due. */
     cmvs_scene_text_tick(in->scene, in->frame_ms);
+    /* And so does a movie: 0x0040CCCD steps every live player once a frame,
+     * before the statement loop, which is where a background that is a .cmv
+     * gets its next picture. */
+    movie_tick(in);
     /*
      * 0x0045a90f, and its place matters: the pass runs ONCE, here, beside the
      * ten timers, and the statement loop below re-enters at 0x0045a914 which

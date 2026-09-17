@@ -239,6 +239,13 @@ int cmvs_session_unimplemented(const cmvs_session *s, int *distinct)
     return s ? cmvs_interp_unimplemented(s->interp, distinct) : 0;
 }
 
+int cmvs_session_movie(const cmvs_session *s, int slot, int *object, int *frame,
+                       int *frames, int *playing)
+{
+    if (!s) return 0;
+    return cmvs_interp_movie(s->interp, slot, object, frame, frames, playing);
+}
+
 int cmvs_session_sprite(const cmvs_session *s, int layer, int sprite,
                         int *x, int *y, int *w, int *h, int *worn)
 {

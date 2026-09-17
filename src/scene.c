@@ -277,6 +277,32 @@ int cmvs_scene_bitmap_file(cmvs_scene *s, int object, int part,
     return wear_bitmap(s, object, part, &img);
 }
 
+int cmvs_scene_bitmap_pixels(cmvs_scene *s, int object, int part,
+                             int w, int h, const uint8_t *bgra, int stride)
+{
+    cmvs_object *o = reach(s, object, part);
+    pb3_image img;
+    int row;
+    if (!o || !bgra || w <= 0 || h <= 0 || stride < 4 * w) return 0;
+    if (o->has_bitmap && o->bitmap.width == w && o->bitmap.height == h
+        && o->bitmap.pixels) {
+        for (row = 0; row < h; row++)
+            memcpy(o->bitmap.pixels + (size_t) row * w * 4,
+                   bgra + (size_t) row * stride, (size_t) w * 4);
+        o->bitmap.has_alpha = 0;
+        return 1;
+    }
+    img.width = w;
+    img.height = h;
+    img.has_alpha = 0;
+    img.pixels = malloc((size_t) w * h * 4);
+    if (!img.pixels) return 0;
+    for (row = 0; row < h; row++)
+        memcpy(img.pixels + (size_t) row * w * 4, bgra + (size_t) row * stride,
+               (size_t) w * 4);
+    return wear_bitmap(s, object, part, &img);
+}
+
 int cmvs_scene_bitmap_blank(cmvs_scene *s, int object, int part, int w, int h)
 {
     pb3_image img;
