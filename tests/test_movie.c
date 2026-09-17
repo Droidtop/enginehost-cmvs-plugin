@@ -75,6 +75,61 @@ static int black_fraction(const uint8_t *px, int w, int h)
     return total ? (int) (black * 100 / total) : 0;
 }
 
+/*
+ * The rig's own measure, and the one that matters to a reader: does the
+ * PICTURE ON THE SCREEN change while nothing is pressed. The build 68 rig pass
+ * reported the monorail frozen because it differenced screen x 0..700,
+ * y 85..530 - which, with the movie drawn at half size and anchored top-left
+ * (DEFECT H), was the movie's own source rectangle x 640..1106, y 416..713,
+ * and every moving macroblock in bg350a.cmv is at y 335 or above. The clock
+ * was running the whole time and nothing on that part of the picture ever
+ * moves. So the check is made over the WHOLE composed frame, not a corner of
+ * it, and against a copy of the frame rather than a frame number.
+ */
+/*
+ * How far the picture reaches across the frame and down it: the last lit pixel
+ * along row 200 and down column 133, which is what the rig measured on its own
+ * screen when it found the movie drawn at 640 x 360 of a 1280 x 720 picture,
+ * anchored top-left (DEFECT H).
+ */
+static void picture_extent(const cmvs_session *s, double *across, double *down)
+{
+    const uint8_t *px = cmvs_session_pixels(s);
+    int w = cmvs_session_width(s), h = cmvs_session_height(s), x, y, r = -1, b = -1;
+    *across = 0; *down = 0;
+    if (!px) return;
+    for (x = 0; x < w; x++) {
+        const uint8_t *q = px + 4 * ((size_t) 200 * w + x);
+        if (q[0] > 8 || q[1] > 8 || q[2] > 8) r = x;
+    }
+    for (y = 0; y < h; y++) {
+        const uint8_t *q = px + 4 * ((size_t) y * w + 133);
+        if (q[0] > 8 || q[1] > 8 || q[2] > 8) b = y;
+    }
+    *across = (r + 1) / (double) w;
+    *down = (b + 1) / (double) h;
+}
+
+static uint8_t *snapshot(const cmvs_session *s)
+{
+    int n = cmvs_session_width(s) * cmvs_session_height(s) * 4;
+    uint8_t *copy = malloc((size_t) n);
+    if (copy) memcpy(copy, cmvs_session_pixels(s), (size_t) n);
+    return copy;
+}
+
+static long pixels_moved(const uint8_t *was, const cmvs_session *s)
+{
+    const uint8_t *now = cmvs_session_pixels(s);
+    long n = 0;
+    int i, total = cmvs_session_width(s) * cmvs_session_height(s);
+    for (i = 0; i < total; i++) {
+        const uint8_t *a = was + 4 * i, *b = now + 4 * i;
+        if (abs(a[0] - b[0]) > 6 || abs(a[1] - b[1]) > 6 || abs(a[2] - b[2]) > 6) n++;
+    }
+    return n;
+}
+
 /* A frame with NO press: the script stays on its message line and the movie
  * player is the only thing that moves. */
 static int idle(cmvs_session *s, int frames)
@@ -410,6 +465,25 @@ static void test_scene(const char *folder, const char *saves, int budget)
     printf("        object %d, %d frames, frame %d, %s\n",
            object, frames, frame, playing ? "playing" : "stopped");
     check(object == 28, "it draws into object 28, the background object");
+    /*
+     * And it is drawn where a camera puts it, measured the frame the movie
+     * opens on, before the rest of the scene is built over it. Reached through
+     * a LOAD the camera is the kind-1 one the constructor leaves behind, whose
+     * screen is 1024 x 614, so a 1280 x 720 picture is centred on (512, 307)
+     * and stops 128 px short across and 53 px short down. What it must never
+     * be again is 0.50 - the picture at its own anchor, because kind 1 had no
+     * projection and nothing placed it (DEFECT H, and the reason the rig's
+     * differencing pass found the monorail frozen: the half of the movie it
+     * could see has no moving macroblock in it).
+     */
+    {
+        double across = 0, down = 0;
+        picture_extent(s, &across, &down);
+        printf("        on the opening frame the picture reaches %.4f across and %.4f down\n",
+               across, down);
+        check(across > 0.8 && down > 0.8,
+              "the movie is drawn where its camera puts it, not at its own anchor");
+    }
     check(frame >= 0, "a frame is on the surface the moment the movie opens");
 
     first_frame = frame;
@@ -445,6 +519,37 @@ static void test_scene(const char *folder, const char *saves, int budget)
         check(playing, "rather than stopping there");
     }
 
+    /*
+     * And the picture itself moves. Three seconds of idle frames, the same
+     * wait the rig used, with the frame it started from kept for comparison.
+     */
+    {
+        uint8_t *before = snapshot(s);
+        long moved_px = 0;
+        int k;
+        check(before != NULL, "the composed frame can be kept for comparison");
+        if (before) {
+            /*
+             * Sampled three times rather than once, because bg350a's loop is
+             * 73 frames at 24 fps - three seconds - and a picture compared
+             * exactly one loop later is the same picture whether or not it
+             * ever moved. The samples are a quarter, a half and three quarters
+             * of a loop apart, and the largest is the answer.
+             */
+            for (k = 0; k < 3; k++) {
+                long now_px;
+                idle(s, 47);
+                now_px = pixels_moved(before, s);
+                if (now_px > moved_px) moved_px = now_px;
+            }
+            printf("        %ld pixels of the composed frame changed, the most of three idle samples\n",
+                   moved_px);
+            free(before);
+        }
+        check(moved_px > 5000,
+              "and the picture a reader sees changes while nothing is pressed");
+    }
+
     black = black_fraction(cmvs_session_pixels(s), cmvs_session_width(s),
                            cmvs_session_height(s));
     printf("        the frame above the message window is %d%% black\n", black);
@@ -453,15 +558,14 @@ static void test_scene(const char *folder, const char *saves, int budget)
      * message lines. Read to FROM A NEW GAME it is now nothing at all: the
      * movie fills the frame the way a still background does.
      *
-     * Reached through a LOAD instead it measures about 51%, and that is not the
-     * movie: after a load this engine places a staged item at about half the
-     * size the original gives it, which shortens every background in the scene
-     * and not only this one - the scenes either side of the monorail, which are
-     * ordinary .pb3 stills, measure 27% on the same walk and nothing on a walk
-     * from a new game. That is a separate defect and it is written down as one,
-     * which is why the bound is the looser 60 when the walk starts from a save.
+     * Reached through a LOAD it used to measure about 51%, because the camera a
+     * load leaves behind is kind 1 and kind 1 had no projection: the movie was
+     * placed at its own anchor, which drew it at half size in the top-left
+     * corner (DEFECT H, and the reason the rig thought the movie was frozen).
+     * With 0x00444069 written both walks measure the same nothing, so there is
+     * one bound.
      */
-    check(black < (loaded ? 60 : 10), "the monorail scene is no longer black");
+    check(black < 10, "the monorail scene is no longer black");
 
     cmvs_session_close(s);
 }
