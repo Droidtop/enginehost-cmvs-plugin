@@ -119,10 +119,9 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeOpen(JNIEnv *env, jclass klass,
     const char *folder_text = java_string(env, folder, &folder_release);
     const char *script_text = java_string(env, script, &script_release);
     /*
-     * The host's own folder for this game's saves. The engine puts the game's
-     * real CSV2 and CSS1 files in the subfolder the boot script names inside
-     * it, so what is written here is what the Windows game writes; with no
-     * folder the engine saves nothing rather than writing into the game.
+     * The root the saves go under: the game folder. The engine puts the
+     * game's real CSV2 and CSS1 files in the subfolder the boot script names
+     * inside it, which is where the Windows game writes them.
      */
     const char *saves_text = java_string(env, saves, &saves_release);
     cmvs_session *session;

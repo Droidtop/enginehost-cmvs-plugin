@@ -73,11 +73,12 @@ public final class CmvsPlugin implements EnginePlugin {
         // The engine falls back to start.ps3, which every CMVS game ships loose
         // beside its archives, so an empty execFile is the normal case.
         // The saves are the GAME's own files - byte-compatible CSV2 slots and
-        // a CSS1 system file, under the names the Windows game uses - written
-        // in the folder the host keeps for this game. Nothing is ever written
-        // into the game folder, and with no folder the engine saves nothing.
-        engine = nativeOpen(session.gamePath(), session.execFile(),
-                            session.host().saveDirectory().getAbsolutePath());
+        // a CSS1 system file, under the names the Windows game uses - and they
+        // go where the Windows game puts them: the folder the boot script
+        // names (save/) inside the GAME folder. Enginehost does not change
+        // where a game saves; its save folder stands in for SYSTEM locations
+        // only, and CMVS has none. Saves made on a PC are simply there.
+        engine = nativeOpen(session.gamePath(), session.execFile(), session.gamePath());
         if (engine == 0) throw new IOException(nativeError());
         view = new ScreenView();
         session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
