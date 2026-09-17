@@ -1697,6 +1697,56 @@ static int command_builtin(cmvs_interp *in, int command)
      * whose window was sized by the string commands takes - so with neither of
      * them here a tap never advanced the scene.
      */
+    case 0x0C8:
+        /*
+         * 0x00465aa0: WHERE THE POINTER IS, into sys[1] and sys[2]. Three
+         * instructions in the original - it hands the two system slots
+         * straight to the input device's own reader at 0x0044bce0, which is
+         * the same reader the menu poll uses, so a script and a menu never
+         * disagree about where the pointer is.
+         *
+         * intproc.ps3 asks it twenty-one times. It is how the in-game toolbar
+         * knows the pointer has reached the top of the screen and which of its
+         * twelve captions it is over: the bar is not a menu, it is a picture
+         * the interrupt script drives from this one answer, which is why the
+         * bar drew but nothing on it could be pressed while this was missing.
+         *
+         * The device's reader answers in the game's own coordinates, and so
+         * does this engine's pointer (see input.h), so there is no conversion
+         * here.
+         */
+        in->sys[1] = in->input.x;
+        in->sys[2] = in->input.y;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x0C9:
+        /*
+         * 0x00465ac0 -> 0x0044bd00, normalised to 0 or 1 by the neg/sbb/neg
+         * the compiler emits for a bool: has the pointer been used at all.
+         * A run driven by a pad alone answers 0, which is the state the
+         * original is in before the mouse is first moved.
+         */
+        in->sys[0] = in->input.have_pointer ? 1 : 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x0CA: {
+        /*
+         * 0x00465af0: is the pointer inside a rectangle. It reads the pointer
+         * with the same 0x0044bce0 and compares INCLUSIVELY on both ends -
+         * `jl` below x and `jg` above x + w - so a rectangle of width w covers
+         * w + 1 columns. That is the original's arithmetic and it is kept:
+         * the alternative is a one-pixel disagreement with a screen that was
+         * laid out against it. The script writes (h, w, y, x), the same
+         * order command 0x213 takes its rectangle in.
+         */
+        int32_t x = arg(in, 4, 3), y = arg(in, 4, 2);
+        int32_t w = arg(in, 4, 1), h = arg(in, 4, 0);
+        int hit = in->input.x >= x && in->input.x <= x + w &&
+                  in->input.y >= y && in->input.y <= y + h;
+        in->sys[0] = hit ? 1 : 0;
+        in->command_known[command] = 1;
+        return 0;
+    }
     case 0x1A0:     /* 0x00468a00 -> 0x00448b20: the left button, +0x43c */
         in->sys[0] = in->input.confirm_released ? 1 : 0;
         in->sys[4] = in->input.confirm_held ? 1 : 0;
@@ -2161,6 +2211,22 @@ static int command_builtin(cmvs_interp *in, int command)
     case 0x210:   /* 0x004690C0: bind menu arg1 to graphic object arg0 */
         in->command_known[command] = cmvs_menu_bind(in->menus, arg(in, 2, 1), arg(in, 2, 0));
         return 0;
+    case 0x21B:
+        /*
+         * 0x00469210, and it is 0x210 with the two sizes named. The ctor it
+         * reaches is the same one (0x00453780): 0x210 fills the menu's
+         * +0x1c/+0x20 from the DISPLAY's own width and height, so its pointer
+         * mapping x = +0x1c * px / +0x0c is the identity; 0x21b takes those
+         * two from the script instead, which is how a screen that lays itself
+         * out in the game's own 1280x720 keeps working when the client area is
+         * another size. Both mappings end in GAME coordinates, and a pointer
+         * reaches this engine already in them (see menu.c), so the two extra
+         * arguments have nothing left to do here - but the BIND does, and
+         * without it intproc.ps3's slot-confirmation panel, which is the only
+         * menu in ChronoClock bound this way, has no items at all.
+         */
+        in->command_known[command] = cmvs_menu_bind(in->menus, arg(in, 4, 3), arg(in, 4, 2));
+        return 0;
     case 0x211:   /* 0x00469370: throw the menu away */
         cmvs_menu_drop(in->menus, arg(in, 1, 0));
         in->command_known[command] = 1;
@@ -2273,6 +2339,25 @@ static int command_builtin(cmvs_interp *in, int command)
         cmvs_interp_load_system(in, NULL, 0);
         return 0;
     }
+    case 0x126:
+        /*
+         * 0x004661a0: the screen size, into sys[1] and sys[2]. It reads them
+         * off the display object - [+0x778][+4] fields +0x18 and +0x1c through
+         * 0x004228c0 and 0x004228d0 - which is the same pair cmvs.cfg's
+         * WINDOW_WIDTH / WINDOW_HEIGHT gave the display at startup.
+         *
+         * Small command, large consequence: intproc.ps3 calls it once at
+         * 0x675d4 and keeps the answer in script variables 288 and 292, and
+         * every screen it draws afterwards positions itself from those. With
+         * them left at zero the slot-confirmation panel lays itself out at
+         * (width/2 - 300, height/2 - 80) = (-300, -80) and so draws off the
+         * top-left corner AND hit-tests there, which is exactly what a device
+         * run saw.
+         */
+        in->sys[1] = cmvs_game_width(in->game);
+        in->sys[2] = cmvs_game_height(in->game);
+        in->command_known[command] = 1;
+        return 0;
     case 0x2b0:   /* 0x0046bb90: the thumbnail size, and whether to take one */
         in->thumb_h = arg(in, 2, 0);
         in->thumb_w = arg(in, 2, 1);
