@@ -85,6 +85,34 @@ int cmvs_save_read(const uint8_t *file, int size, cmvs_save *out,
  */
 uint8_t *cmvs_save_write(const cmvs_save *s, int *size_out, char *err, size_t errlen);
 
+/*
+ * What the LOAD SCREEN reads, which is not what a load reads.
+ *
+ * 0x0046c0e0 - the command the list screen calls once per listed slot - reads
+ * the file and checks ONE thing: the magic is "CSV" with a fourth byte in
+ * '2'..'9'. It never deciphers stream A, never walks the records and never
+ * verifies the checksum, so a slot written by a newer engine, or carrying a
+ * record tag this one does not know, still appears in the list with its date
+ * and its picture. Going through cmvs_save_read here instead would hide
+ * exactly those slots, so this is a separate, deliberately shallow reader.
+ *
+ * `out` receives the 0x258-byte header and, when header 0x224 and the
+ * compressed size at 0x234 are both non-zero, the expanded thumbnail; the
+ * record list and the script image are left empty. Returns 1, or 0 with err.
+ */
+int cmvs_save_peek(const uint8_t *file, int size, cmvs_save *out,
+                   char *err, size_t errlen);
+
+/*
+ * The slot's timestamp as the list screen gets it: the caption's own digits
+ * packed the way 0x0047f550 packs them, which is the MS-DOS date/time word
+ * pair - year-2000 in bits 25..31, month 21..24, day 16..20, hour 11..15,
+ * minute 5..10 and half-seconds 0..4. The script formats the list's
+ * "YYYY/MM/DD hh:mm" out of this one number, which is why an unread slot
+ * shows 2000/00/00 00:00.
+ */
+int32_t cmvs_save_packed_time(const cmvs_save *s);
+
 /* A deep copy, so a state can keep the record list it came from without
  * holding on to the buffer the file was read into. */
 int cmvs_save_clone(cmvs_save *dst, const cmvs_save *src);

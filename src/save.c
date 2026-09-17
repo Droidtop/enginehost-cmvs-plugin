@@ -281,6 +281,64 @@ static uint8_t *build_records(const cmvs_save *s, int *size_out, char *err, size
 
 /* ------------------------------------------------------------------- CSV2 */
 
+int cmvs_save_peek(const uint8_t *file, int size, cmvs_save *out,
+                   char *err, size_t errlen)
+{
+    uint32_t ca, cb, ub;
+
+    cmvs_save_init(out);
+    if (size < CMVS_SAVE_HEADER) { fail(err, errlen, "too short for a CSV header"); return 0; }
+    if (file[0] != 'C' || file[1] != 'S' || file[2] != 'V'
+        || file[3] < '2' || file[3] > '9') {
+        fail(err, errlen, "not a CSV save");
+        return 0;
+    }
+    memcpy(out->header, file, CMVS_SAVE_HEADER);
+
+    ca = rd32(file + 0x230);
+    cb = rd32(file + 0x234);
+    ub = rd32(file + 0x248);
+    if (!rd16(file + CMVS_SAVE_HAS_THUMB) || !cb || !ub) return 1;
+    /* The reader is shallow but it still may not walk off the file. */
+    if (ca > (uint32_t) size || cb > (uint32_t) size
+        || (uint32_t) CMVS_SAVE_HEADER + ca + cb > (uint32_t) size) return 1;
+    out->thumb = malloc((size_t) ub + 1);
+    if (!out->thumb) { fail(err, errlen, "out of memory"); return 1; }
+    if (cmvs_lzss_expand(&cmvs_lzss_csv2, file + CMVS_SAVE_HEADER + ca, (int) cb,
+                         out->thumb, (int) ub) != (int) ub) {
+        free(out->thumb);
+        out->thumb = NULL;
+        return 1;
+    }
+    out->thumb_size = (int) ub;
+    return 1;
+}
+
+/*
+ * 0x0047f550. The caption is "%Y-%m-%d %H:%M:%S ..." and this reads its digits
+ * by position - 2,3 then 5,6 then 8,9 then 11,12 then 14,15 then 17,18 - with
+ * no validation at all, which is why it answers 0 for a caption of NULs and
+ * the list then shows 2000/00/00 00:00.
+ */
+int32_t cmvs_save_packed_time(const cmvs_save *s)
+{
+    const signed char *c;
+    uint32_t v;
+    if (!s) return 0;
+    c = (const signed char *) s->header + CMVS_SAVE_CAPTION;
+    /* Transcribed instruction for instruction, sign-extending bytes the way
+     * the original's movsx does and masking where it masks, so a caption that
+     * is not a timestamp answers the same nonsense here as there instead of a
+     * tidier number this engine invented. */
+    v  = (uint32_t) ((c[3] + 10 * c[2] - 528)) << 25;
+    v |= ((uint32_t) (c[5] * 0x7fa + c[6]) << 21) & 0x01E00000u;
+    v |= ((uint32_t) ((c[9] + 10 * c[8] - 176)) & 0x1Fu) << 16;
+    v |= ((uint32_t) ((c[12] + 10 * c[11] - 176)) & 0x1Fu) << 11;
+    v |= (((uint32_t) (c[15] + 10 * c[14]) << 5) - 0x200u) & 0x7E0u;
+    v |= (((uint32_t) (c[18] + 10 * c[17] - 16)) >> 1) & 0x1Fu;
+    return (int32_t) v;
+}
+
 int cmvs_save_read(const uint8_t *file, int size, cmvs_save *out,
                    char *err, size_t errlen)
 {

@@ -77,6 +77,25 @@ void cmvs_scene_extent(cmvs_scene *s, int object, int part, int w, int h);
  * any archive, which is what the command reports back to the script. */
 int cmvs_scene_bitmap(cmvs_scene *s, int object, const char *name);
 
+/*
+ * The same, from a file already in memory rather than from an archive. The
+ * original reaches it through 0x00420840 -> 0x0042fa50 -> 0x0042f2c0, which
+ * sniffs four magics and nothing else (PNG, "BM", PB3B, MSK0); the LOAD
+ * screen's slot thumbnails are the "BM" case, read by 0x0042ec80, and that
+ * reader takes THREE fields - biWidth at 0x12, biHeight at 0x16, biBitCount at
+ * 0x1c - refuses anything under 24 bpp and reads the pixels from a FIXED 0x36,
+ * ignoring bfOffBits. A negative biHeight is a top-down bitmap.
+ */
+int cmvs_scene_bitmap_file(cmvs_scene *s, int object, int part,
+                           const uint8_t *file, int size);
+
+/*
+ * A blank plate of that size, which is what the LOAD screen draws for a slot
+ * that has no thumbnail: 0x0046c2ea makes one at the size command 0x2b0 set
+ * and hands it to 0x00434060 instead of the decoded picture.
+ */
+int cmvs_scene_bitmap_blank(cmvs_scene *s, int object, int part, int w, int h);
+
 /* Command 0x033 (0x0045f1b0): the extent of the bitmap an object holds, which
  * is what a scene sizes its source rectangles from. */
 int cmvs_scene_bitmap_size(cmvs_scene *s, int object, int part,

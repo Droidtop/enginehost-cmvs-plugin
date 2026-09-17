@@ -1141,6 +1141,14 @@ static int eval_float_expression(cmvs_interp *in, int at, int depth, float *resu
  * arguments from under the stack top and does NOT pop them; the bytecode drops
  * them itself with 0x0412. So arg(n, i) is the i-th of n pushed values.
  */
+/* A little-endian dword out of a save header, which is how the original reads
+ * every one of them. */
+static uint32_t rd32le(const uint8_t *p)
+{
+    return (uint32_t) p[0] | ((uint32_t) p[1] << 8)
+         | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
+}
+
 static int32_t arg(const cmvs_interp *in, int n, int i)
 {
     return stack_get(in, in->sp - 4 * (n - i));
@@ -1162,6 +1170,8 @@ static const char *as_string(cmvs_interp *in, int32_t v)
  * script ends on it rather than running off its own end.
  */
 static int command_builtin(cmvs_interp *in, int command);
+static int slot_path(const cmvs_interp *in, int slot, char *out, size_t n);
+static uint8_t *read_file(const char *path, int *size_out);
 static void ensure_folder(const char *path);
 static int load_slot(cmvs_interp *in, int slot, const char *name, char *err, size_t errlen);
 static int enter_script(cmvs_interp *in, const char *name, char *err, size_t errlen);
@@ -2415,6 +2425,117 @@ static int command_builtin(cmvs_interp *in, int command)
             return 0;
         }
         return CMVS_CMD_OWN;
+    }
+    case 0x2BD: {
+        /*
+         * 0x0046c0e0: WHAT THE LIST SCREEN KNOWS ABOUT A SLOT. The Data Load
+         * and Data Save screens call it once per row, and every visible thing
+         * about an occupied slot comes out of this one command: the picture,
+         * the caption, and the date the row prints.
+         *
+         * Arguments, as the handler reads them off the stack - the script
+         * writes them (dest2, dest1, part, object, slot):
+         *   slot    [sp-0x04]  save%03d.dat, 0..0x3e7
+         *   object  [sp-0x08]  the graphic object the thumbnail goes on, < 0x100
+         *   part    [sp-0x0c]  its part, or -1 for the object itself
+         *   dest1   [sp-0x10]  string handle, filled from header 0x010
+         *   dest2   [sp-0x14]  string handle, filled from header 0x110
+         *
+         * and what it answers:
+         *   sys[0]  1 when the slot is there and readable, 0 otherwise
+         *   sys[1]  the caption's timestamp, packed by 0x0047f550
+         *   sys[4]  sys[5]  sys[6]   header 0x210, 0x214, 0x218
+         *
+         * The picture: with header 0x224 and the compressed size at 0x234 both
+         * non-zero it expands stream B and hands the buffer to the bitmap
+         * reader (0x00433ee0); with either zero it puts a blank plate of the
+         * size command 0x2b0 set there instead (0x0046c2ea). Either way the
+         * object or part is created FIRST - 0x004328b0 for the object,
+         * 0x00433cb0 for a part - so a row that was occupied a moment ago and
+         * is not any more does not keep the old picture.
+         *
+         * While this was a missing slot the list could only ever draw itself
+         * empty, and command 0x2b5 - the load - was unreachable through the
+         * game's own UI.
+         */
+        int32_t slot = arg(in, 5, 4);
+        int32_t object = arg(in, 5, 3);
+        int32_t part = arg(in, 5, 2);
+        int32_t dest1 = arg(in, 5, 1), dest2 = arg(in, 5, 0);
+        char path[1024], why[256];
+        uint8_t *file;
+        cmvs_save peek;
+        int size = 0;
+        char *dst;
+        size_t room;
+
+        in->command_known[command] = 1;
+        in->sys[0] = 0;
+        if (slot < 0 || object < 0 || object >= 0x100) return 0;
+        if (!slot_path(in, (int) slot, path, sizeof path)) return 0;
+        file = read_file(path, &size);
+        if (!file) return 0;
+        if (!cmvs_save_peek(file, size, &peek, why, sizeof why)) {
+            free(file);
+            return 0;
+        }
+        free(file);
+
+        if (part < 0) cmvs_scene_object(in->scene, (int) object);
+        else cmvs_scene_part(in->scene, (int) object, (int) part);
+        if (peek.thumb && peek.thumb_size > 0)
+            cmvs_scene_bitmap_file(in->scene, (int) object, (int) part,
+                                   peek.thumb, peek.thumb_size);
+        else
+            cmvs_scene_bitmap_blank(in->scene, (int) object, (int) part,
+                                    in->thumb_w, in->thumb_h);
+
+        dst = string_buffer(in, dest1, &room);
+        if (dst) snprintf(dst, room, "%s", (const char *) peek.header + CMVS_SAVE_CAPTION);
+        dst = string_buffer(in, dest2, &room);
+        if (dst) snprintf(dst, room, "%s", (const char *) peek.header + CMVS_SAVE_CAPTION2);
+
+        in->sys[1] = cmvs_save_packed_time(&peek);
+        in->sys[4] = (int32_t) rd32le(peek.header + 0x210);
+        in->sys[5] = (int32_t) rd32le(peek.header + 0x214);
+        in->sys[6] = (int32_t) rd32le(peek.header + 0x218);
+        in->sys[0] = 1;
+        cmvs_save_free(&peek);
+        return 0;
+    }
+    case 0x2B7: {
+        /*
+         * 0x0046bd00 -> 0x0047f8c0: WHICH SLOT IS THE NEWEST, over the range
+         * [first, first + count). The routine reads the first 0x40 bytes of
+         * every save%03d.dat in the range, keeps the one whose packed caption
+         * time is largest, and answers -1 when none of them is a CSV file. It
+         * is how the screen preselects a row and how CONTINUE knows what to
+         * resume. Arguments are (first, count) and it refuses a range that
+         * runs past slot 0x3e7.
+         */
+        int32_t count = arg(in, 2, 1), first = arg(in, 2, 0);
+        int best = -1;
+        uint32_t best_time = 0;
+        int i;
+        in->command_known[command] = 1;
+        if (count < 0 || first + count > 0x3e7) { in->sys[0] = -1; return 0; }
+        for (i = (int) first; i < (int) (first + count); i++) {
+            char path[1024], why[256];
+            uint8_t *file;
+            cmvs_save peek;
+            int size = 0;
+            uint32_t when;
+            if (!slot_path(in, i, path, sizeof path)) break;
+            file = read_file(path, &size);
+            if (!file) continue;
+            if (!cmvs_save_peek(file, size, &peek, why, sizeof why)) { free(file); continue; }
+            free(file);
+            when = (uint32_t) cmvs_save_packed_time(&peek);
+            cmvs_save_free(&peek);
+            if (when > best_time) { best_time = when; best = i; }
+        }
+        in->sys[0] = best;
+        return 0;
     }
     case 0x2b6: {   /* 0x0046fc30 -> 0x0046f490: write the slot */
         int32_t slot = arg(in, 1, 0);

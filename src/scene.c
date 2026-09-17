@@ -199,6 +199,69 @@ int cmvs_scene_bitmap(cmvs_scene *s, int object, const char *name)
     return 1;
 }
 
+/* Puts a decoded picture on the object or part, freeing whatever was there. */
+static int wear_bitmap(cmvs_scene *s, int object, int part, pb3_image *img)
+{
+    cmvs_object *o = reach(s, object, part);
+    if (!o) { pb3_free(img); return 0; }
+    if (o->has_bitmap) pb3_free(&o->bitmap);
+    o->bitmap = *img;
+    o->has_bitmap = 1;
+    return 1;
+}
+
+int cmvs_scene_bitmap_file(cmvs_scene *s, int object, int part,
+                           const uint8_t *file, int size)
+{
+    pb3_image img;
+    int w, h, bpp, top_down, row, col, stride;
+    if (!file || size < 0x36) return 0;
+    if (file[0] != 'B' || file[1] != 'M') return 0;
+    w = (int) ((uint32_t) file[0x12] | ((uint32_t) file[0x13] << 8)
+               | ((uint32_t) file[0x14] << 16) | ((uint32_t) file[0x15] << 24));
+    h = (int) ((uint32_t) file[0x16] | ((uint32_t) file[0x17] << 8)
+               | ((uint32_t) file[0x18] << 16) | ((uint32_t) file[0x19] << 24));
+    bpp = file[0x1c] | (file[0x1d] << 8);
+    if (bpp != 24 && bpp != 32) return 0;
+    top_down = h < 0;
+    if (top_down) h = -h;
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return 0;
+    /* Rows are padded to a four-byte boundary, which is the only thing about
+     * the layout the reader does not take from a header field. */
+    stride = (w * (bpp / 8) + 3) & ~3;
+    if ((long) size - 0x36 < (long) stride * h) return 0;
+    img.width = w;
+    img.height = h;
+    img.has_alpha = 0;
+    img.pixels = malloc((size_t) w * h * 4);
+    if (!img.pixels) return 0;
+    for (row = 0; row < h; row++) {
+        const uint8_t *src = file + 0x36 + (size_t) stride * (top_down ? row : h - 1 - row);
+        uint8_t *dst = img.pixels + (size_t) row * w * 4;
+        for (col = 0; col < w; col++) {
+            dst[0] = src[0];
+            dst[1] = src[1];
+            dst[2] = src[2];
+            dst[3] = 0xFF;
+            src += bpp / 8;
+            dst += 4;
+        }
+    }
+    return wear_bitmap(s, object, part, &img);
+}
+
+int cmvs_scene_bitmap_blank(cmvs_scene *s, int object, int part, int w, int h)
+{
+    pb3_image img;
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return 0;
+    img.width = w;
+    img.height = h;
+    img.has_alpha = 0;
+    img.pixels = calloc((size_t) w * h, 4);
+    if (!img.pixels) return 0;
+    return wear_bitmap(s, object, part, &img);
+}
+
 /*
  * Command 0x033 (0x0045f1b0) asks an object how big its bitmap is: the object
  * at +0x77c is reached, its image queried, and the width at +0x68, the height
