@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "camera.h"
 #include "game.h"
 #include "save.h"
 #include "session.h"
@@ -891,16 +892,304 @@ static void test_text_records(const char *dir, const char *game, const char *nam
     cmvs_save_free(&save);
 }
 
+/* ------------------------------------------------------- the LOAD screen */
+
+/*
+ * What the list screen reads out of a slot, which is what command 0x2bd
+ * (0x0046c0e0) answers. This is the container half and needs no game: the
+ * caption, the timestamp packed the way 0x0047f550 packs it, and the
+ * thumbnail expanded out of stream B.
+ *
+ * It matters that this reader is SHALLOWER than a load's. 0x0046c0e0 checks
+ * the magic and nothing else, so a slot a newer engine wrote still appears in
+ * the list; the last checks here are that a file whose checksum has been
+ * destroyed - which cmvs_save_read refuses - still peeks, and that a fourth
+ * magic byte outside the range does not.
+ */
+static void test_peek(const char *dir, const char *name)
+{
+    uint8_t *file;
+    int size = 0;
+    cmvs_save peek;
+    char err[256] = {0}, what[256];
+    const char *caption;
+    unsigned when;
+
+    file = slurp_from(dir, name, &size);
+    if (!file) return;
+    snprintf(what, sizeof what, "%s: the list screen's reader takes it", name);
+    check(cmvs_save_peek(file, size, &peek, err, sizeof err), what);
+    if (!peek.header[0]) { free(file); return; }
+
+    caption = (const char *) peek.header + CMVS_SAVE_CAPTION;
+    printf("        caption \"%s\"\n", caption);
+    snprintf(what, sizeof what, "%s: the caption is a timestamp and a title", name);
+    check(strlen(caption) > 19 && caption[4] == '-' && caption[7] == '-'
+          && caption[10] == ' ' && caption[13] == ':' && caption[16] == ':', what);
+
+    when = (unsigned) cmvs_save_packed_time(&peek);
+    printf("        packed time %08X = %04d/%02d/%02d %02d:%02d\n", when,
+           2000 + (int) ((when >> 25) & 0x7F), (int) ((when >> 21) & 0xF),
+           (int) ((when >> 16) & 0x1F), (int) ((when >> 11) & 0x1F),
+           (int) ((when >> 5) & 0x3F));
+    snprintf(what, sizeof what, "%s: the packed time is the caption's own digits", name);
+    check((int) ((when >> 25) & 0x7F) == (caption[2] - '0') * 10 + (caption[3] - '0')
+          && (int) ((when >> 21) & 0xF) == (caption[5] - '0') * 10 + (caption[6] - '0')
+          && (int) ((when >> 16) & 0x1F) == (caption[8] - '0') * 10 + (caption[9] - '0')
+          && (int) ((when >> 11) & 0x1F) == (caption[11] - '0') * 10 + (caption[12] - '0')
+          && (int) ((when >> 5) & 0x3F) == (caption[14] - '0') * 10 + (caption[15] - '0'),
+          what);
+    snprintf(what, sizeof what, "%s: the packed time is not zero, so a row can print it", name);
+    check(when != 0, what);
+
+    snprintf(what, sizeof what, "%s: the thumbnail comes out of stream B", name);
+    check(peek.thumb != NULL && peek.thumb_size > 54, what);
+    if (peek.thumb && peek.thumb_size > 0x36) {
+        int w = (int) ((unsigned) peek.thumb[0x12] | ((unsigned) peek.thumb[0x13] << 8));
+        int h = (int) ((unsigned) peek.thumb[0x16] | ((unsigned) peek.thumb[0x17] << 8));
+        int bpp = peek.thumb[0x1c] | (peek.thumb[0x1d] << 8);
+        printf("        thumbnail %dx%d, %d bpp, %d bytes\n", w, h, bpp, peek.thumb_size);
+        snprintf(what, sizeof what, "%s: and it is the 192x108 24-bit BMP the reader wants", name);
+        check(peek.thumb[0] == 'B' && peek.thumb[1] == 'M'
+              && w == 192 && h == 108 && bpp == 24, what);
+    }
+    cmvs_save_free(&peek);
+
+    {
+        cmvs_save shallow;
+        file[size - 1] ^= 0xFF;
+        snprintf(what, sizeof what, "%s: a broken checksum still LISTS, as in the original", name);
+        check(cmvs_save_peek(file, size, &shallow, err, sizeof err), what);
+        cmvs_save_free(&shallow);
+        file[size - 1] ^= 0xFF;
+        file[3] = 'Z';
+        snprintf(what, sizeof what, "%s: a fourth magic byte outside 2..9 does not", name);
+        check(!cmvs_save_peek(file, size, &shallow, err, sizeof err), what);
+    }
+    free(file);
+}
+
+/*
+ * The camera, with snky02.ps3's own numbers. The scene is the rooftop pool
+ * about 1200 lines into the prologue: 0x058 gives camera 0 a reference depth
+ * of 70 with 128 x 72 world units across it, 0x059 a 1280 x 720 screen, and
+ * 0x062 stands the camera at (-63, 36, 25) while the background sits at
+ * (0, 36, 70) with a plane of 70 and its anchor on its own centre (910, 512).
+ *
+ * The projection's scale is the perspective factor SQUARED (0x00443eda), and
+ * that is the whole of the difference between a background that covers the
+ * frame and the one that drew in its right 42 per cent with black behind
+ * everything else. The check is geometric rather than numeric: the bitmap,
+ * placed by its anchor at the point the camera gives, must reach past both
+ * edges of the 1280-wide frame.
+ */
+static void test_projection(void)
+{
+    cmvs_camera c;
+    cmvs_placement p;
+    cmvs_projection at;
+    float left, right, factor;
+
+    printf("the camera, with snky02.ps3's rooftop numbers\n");
+    cmvs_camera_init(&c);
+    c.kind = 3;
+    c.x = -63.0f; c.y = 36.0f; c.z = 25.0f;
+    c.reference_depth = 70.0f; c.view_width = 128.0f; c.view_height = 72.0f;
+    c.screen_width = 1280.0f; c.screen_height = 720.0f;
+    c.centre_x = 640.0f; c.centre_y = 360.0f;
+    c.lift = 6.0f; c.aspect_x = 1.0f; c.aspect_y = 1.0f;
+
+    memset(&p, 0, sizeof p);
+    p.x = 0.0f; p.y = 36.0f; p.z = 70.0f;
+    p.plane = 70.0f;
+    p.scale_x = 1.0f; p.scale_y = 1.0f;
+
+    check(cmvs_camera_project(&c, &p, &at) != 0, "the background projects at all");
+    factor = 70.0f / (70.0f - 25.0f);
+    printf("        anchor at x %.1f, scale %.3f (the factor is %.3f)\n",
+           at.x, at.scale_x, factor);
+    check(at.scale_x > factor * factor - 0.001f && at.scale_x < factor * factor + 0.001f,
+          "the scale is the perspective factor squared, not once");
+    left = at.x - 910.0f * at.scale_x;
+    right = left + 1820.0f * at.scale_x;
+    printf("        the bitmap covers x %.1f .. %.1f\n", left, right);
+    check(left <= 0.0f && right >= 1280.0f, "and so it still covers the whole frame");
+
+    p.z = 70.0f;
+    c.z = 0.0f;
+    check(cmvs_camera_project(&c, &p, &at) != 0, "an item at its own depth projects");
+    check(at.scale_x > 0.999f && at.scale_x < 1.001f,
+          "and squaring the factor changes nothing there");
+}
+
+/*
+ * THE LOAD SCREEN, THROUGH THE GAME'S OWN UI, which is the only way the
+ * loaded state can be checked without a rig.
+ *
+ * It presses what a player presses: LOAD on the title, then slot 001, then
+ * YES on the panel that comes up. Every one of those is a menu item and the
+ * engine reports which one it answered, so the walk is checked at each step
+ * rather than only at the end.
+ *
+ * Two things it proves that nothing else does. The slot tile must carry the
+ * save's own picture: it is compared against the tile beside it, which has no
+ * save, and before command 0x2bd the two were identical because every row drew
+ * empty. And the panel must be pressable at all: before commands 0x126 and
+ * 0x21b it was built at (-300, -80) with no items, so the walk stopped there.
+ */
+#define LOAD_ITEM        3        /* the title's LOAD, menu 0 */
+#define SLOT1_ITEM      70        /* the first row of the grid, menu 1 */
+#define CONFIRM_YES      1        /* the panel, menu 2 */
+#define SLOT1_X         44        /* 0x213's rectangle for item 70 */
+#define SLOT1_Y        199
+#define SLOT2_X        244        /* item 71, and no save behind it */
+#define TILE_W         192
+#define TILE_H         108
+#define YES_X          530        /* the middle of item 1's 140 x 64 at (460, 336) */
+#define YES_Y          368
+
+static void tile_mean(const cmvs_session *s, int x, int y, int w, int h, int out[3])
+{
+    const uint8_t *px = cmvs_session_pixels(s);
+    int r, c, n = 0, width = cmvs_session_width(s), height = cmvs_session_height(s);
+    long sum[3] = {0, 0, 0};
+    out[0] = out[1] = out[2] = -1;
+    if (!px) return;
+    for (r = y; r < y + h && r < height; r++)
+        for (c = x; c < x + w && c < width; c++) {
+            const uint8_t *q = px + 4 * ((size_t) r * width + c);
+            sum[0] += q[0]; sum[1] += q[1]; sum[2] += q[2];
+            n++;
+        }
+    if (!n) return;
+    out[0] = (int) (sum[0] / n);
+    out[1] = (int) (sum[1] / n);
+    out[2] = (int) (sum[2] / n);
+}
+
+/*
+ * Points at (x, y) and presses there once every forty frames until the engine
+ * answers with that item, or the frames run out. The repeat is what makes the
+ * walk deterministic without hard-coding how long a screen takes to build.
+ */
+static int press_until(cmvs_session *s, int x, int y, int item, int cap)
+{
+    char err[256] = {0};
+    int f, last = -1, before, now;
+    before = cmvs_session_menu_events(s, &last);
+    for (f = 0; f < cap; f++) {
+        cmvs_session_pointer(s, x, y);
+        if (f % 40 == 0) cmvs_session_button(s, 0, 1);
+        if (f % 40 == 2) cmvs_session_button(s, 0, 0);
+        if (cmvs_session_frame(s, err, sizeof err) <= 0) return 0;
+        now = cmvs_session_menu_events(s, &last);
+        if (now > before && last == item) return 1;
+    }
+    return 0;
+}
+
+static void test_load_screen(const char *dir, const char *game)
+{
+    char err[256] = {0}, path[1024], saves[1024];
+    cmvs_session *s;
+    uint8_t *reference;
+    int reference_size = 0, i;
+    int full[3], empty[3], apart;
+    const cmvs_text *t;
+
+    printf("the Data Load screen, in %s\n", game);
+    snprintf(saves, sizeof saves, "%s/cmvs-loadscreen-test", game_scratch());
+    s = cmvs_session_open(game, NULL, NULL, saves, err, sizeof err);
+    if (!s) { printf("  --    %s\n", err); return; }
+    for (i = 0; i < 400 && !cmvs_session_save_folder(s); i++)
+        cmvs_session_frame(s, err, sizeof err);
+    if (!cmvs_session_save_folder(s)) { cmvs_session_close(s); return; }
+
+    reference = slurp_from(dir, "save000.dat", &reference_size);
+    if (!reference) { cmvs_session_close(s); return; }
+    snprintf(path, sizeof path, "%s/save000.dat", cmvs_session_save_folder(s));
+    if (!write_out(path, reference, reference_size)) {
+        free(reference); cmvs_session_close(s); return;
+    }
+    free(reference);
+    /* The row beside it has to be genuinely empty for the comparison below. */
+    snprintf(path, sizeof path, "%s/save001.dat", cmvs_session_save_folder(s));
+    remove(path);
+
+    if (!press_until(s, 640, 470, LOAD_ITEM, 1200)) {
+        check(0, "LOAD on the title screen answers");
+        cmvs_session_close(s); return;
+    }
+    check(1, "LOAD on the title screen answers");
+    for (i = 0; i < 200; i++) cmvs_session_frame(s, err, sizeof err);
+
+    tile_mean(s, SLOT1_X, SLOT1_Y, TILE_W, TILE_H, full);
+    tile_mean(s, SLOT2_X, SLOT1_Y, TILE_W, TILE_H, empty);
+    printf("        slot 001 mean BGR %02X%02X%02X, slot 002 %02X%02X%02X\n",
+           full[0], full[1], full[2], empty[0], empty[1], empty[2]);
+    apart = abs(full[0] - empty[0]) + abs(full[1] - empty[1]) + abs(full[2] - empty[2]);
+    check(apart > 60, "the occupied row draws its own picture, the empty row does not");
+
+    if (!press_until(s, SLOT1_X + TILE_W / 2, SLOT1_Y + TILE_H / 2, SLOT1_ITEM, 1200)) {
+        check(0, "pressing slot 001 answers with its item");
+        cmvs_session_close(s); return;
+    }
+    check(1, "pressing slot 001 answers with its item");
+    for (i = 0; i < 200; i++) cmvs_session_frame(s, err, sizeof err);
+
+    if (!press_until(s, YES_X, YES_Y, CONFIRM_YES, 1200)) {
+        check(0, "the confirmation panel is where a player can press it");
+        cmvs_session_close(s); return;
+    }
+    check(1, "the confirmation panel is where a player can press it");
+    /*
+     * The load is taken the moment the panel answers YES: the pc belongs to
+     * the save from then on, so the run leaves menu.ps3 and intproc.ps3 for
+     * the script the save was taken in. That, and not a line count, is what
+     * says the load happened - a freshly restored state has read no lines yet.
+     */
+    for (i = 0; i < 400; i++) {
+        const char *now = cmvs_session_script(s);
+        if (now && strcmp(now, "menu.ps3") && strcmp(now, "intproc.ps3")
+            && strcmp(now, "intcode.ps3") && strcmp(now, "start.ps3")) break;
+        cmvs_session_frame(s, err, sizeof err);
+    }
+    printf("        after the load: %ld lines, in %s",
+           cmvs_session_messages(s), cmvs_session_script(s)), putchar(10);
+    check(cmvs_session_script(s) && !strcmp(cmvs_session_script(s), "snky01.ps3"),
+          "the load through the UI lands in the script the save was taken in");
+
+    /*
+     * And the loaded state itself, which is BRIEF check 2 and could only be
+     * asked on a device before this walk existed. Text object 7 is the message
+     * window - command 0x15d registers layer 0 under that id - and the save's
+     * own 0x380 record is what it must be carrying.
+     */
+    t = cmvs_session_text(s, 7);
+    check(t != NULL, "the message window exists after a load through the UI");
+    if (t) {
+        printf("        id 7: at (%d, %d), box %d x %d at (%d, %d), size %d, colours %06X/%06X\n",
+               t->x, t->y, t->rw, t->rh, t->rx, t->ry, t->size,
+               (unsigned) t->colour & 0xFFFFFFu, (unsigned) t->colour2 & 0xFFFFFFu);
+        check(t->rw > 0 && t->rh > 0 && t->size > 0,
+              "and it is boxed and sized rather than left at the defaults");
+    }
+    cmvs_session_close(s);
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : NULL;
     const char *game = argc > 2 ? argv[2] : NULL;
 
     test_shapes();
+    test_projection();
     if (dir) {
         printf("reference saves in %s\n", dir);
         test_slot(dir, "save000.dat");
         test_slot(dir, "save002.dat");
+        test_peek(dir, "save000.dat");
+        test_peek(dir, "save002.dat");
         test_system(dir, "system.dat");
         test_system(dir, "system.bak");
     } else {
@@ -911,6 +1200,7 @@ int main(int argc, char **argv)
         test_text_records(dir, game, "save000.dat");
         test_text_records(dir, game, "save002.dat");
         test_choice(dir, game);
+        test_load_screen(dir, game);
     }
     else printf("no game to save from; the engine round trip needs one\n");
 
