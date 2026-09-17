@@ -5,7 +5,7 @@
 
 #define MAX_FREQ 2100000000
 
-static const uint8_t ZIGZAG[64] = {
+const uint8_t jbp_zigzag[64] = {
      1,  8, 16,  9,  2,  3, 10, 17,
     24, 32, 25, 18, 11,  4,  5, 12,
     19, 26, 33, 40, 48, 41, 34, 27,
@@ -14,6 +14,19 @@ static const uint8_t ZIGZAG[64] = {
     22, 15, 23, 30, 37, 44, 51, 58,
     59, 52, 45, 38, 31, 39, 46, 53,
     60, 61, 54, 47, 55, 62, 63,  0,
+};
+
+/* 0x005681c0: the same walk with the DC in front, which is the order a
+ * quantisation table is stored in. */
+const uint8_t jbp_zigzag_dc[64] = {
+     0,  1,  8, 16,  9,  2,  3, 10,
+    17, 24, 32, 25, 18, 11,  4,  5,
+    12, 19, 26, 33, 40, 48, 41, 34,
+    27, 20, 13,  6,  7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36,
+    29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46,
+    53, 60, 61, 54, 47, 55, 62, 63,
 };
 
 static uint8_t REVERSE[256];
@@ -46,18 +59,19 @@ static int u16(const uint8_t *b, size_t o) { return b[o] | (b[o + 1] << 8); }
 
 /* ---------------------------------------------------------------- bitstream */
 
-typedef struct {
-    const uint8_t *in;
-    int pos, end;
-    uint32_t bits;
-    int cached;
-    int overrun;
-} bitstream;
+void jbp_bits_init(jbp_bits *s, const uint8_t *data, int pos, int end)
+{
+    memset(s, 0, sizeof *s);
+    s->in = data;
+    s->pos = pos;
+    s->end = end;
+}
 
-static int get_bits(bitstream *s, int count)
+int jbp_bits_get(jbp_bits *s, int count)
 {
     while (s->cached < count) {
         if (s->pos >= s->end) { s->overrun = 1; return 0; }
+        init_reverse();
         s->bits = (s->bits << 8) | REVERSE[s->in[s->pos++]];
         s->cached += 8;
     }
@@ -80,17 +94,9 @@ static int signed_coeff(int v, int bit_count)
 
 /* ------------------------------------------------------------------ huffman */
 
-typedef struct {
-    const uint8_t *base;
-    int leaf_count;
-    int nodes[0x400];
-    int root;
-} huffman;
-
-static void huffman_build(huffman *h, const uint8_t *base, int leaf_count, int32_t *freq)
+void jbp_huffman_build(jbp_huffman *h, int leaf_count, int32_t *freq)
 {
     int depth = leaf_count;
-    h->base = base;
     h->leaf_count = leaf_count;
     memset(h->nodes, 0, sizeof h->nodes);
     for (;;) {
@@ -109,11 +115,11 @@ static void huffman_build(huffman *h, const uint8_t *base, int leaf_count, int32
     h->root = depth - 1;
 }
 
-static int huffman_read(const huffman *h, bitstream *s)
+int jbp_huffman_read(const jbp_huffman *h, jbp_bits *s)
 {
     int v = h->root;
     while (v >= h->leaf_count) {
-        v = h->nodes[v + (get_bits(s, 1) << 9)];
+        v = h->nodes[v + (jbp_bits_get(s, 1) << 9)];
         if (s->overrun) return 0;
     }
     return v;
@@ -123,9 +129,14 @@ static int huffman_read(const huffman *h, bitstream *s)
 
 static int16_t s16(int v) { return (int16_t) (uint16_t) (unsigned) v; }
 
-static void idct(int16_t *t, const int16_t *q)
+void jbp_idct(int16_t *t, const int16_t *q)
 {
+    static const int16_t ones[64] = {
+        1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,
+        1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,
+    };
     int p;
+    if (!q) q = ones;
     for (p = 0; p < 8; p++) {
         if (t[p + 0x08] == 0 && t[p + 0x10] == 0 && t[p + 0x18] == 0 && t[p + 0x20] == 0
             && t[p + 0x28] == 0 && t[p + 0x30] == 0 && t[p + 0x38] == 0) {
@@ -207,6 +218,55 @@ static uint8_t clamp_ycc(int c)
     return (uint8_t) (c - 0x100);
 }
 
+/*
+ * The four luma blocks cover the macroblock's four quadrants; the two chroma
+ * blocks are one 8x8 each over the whole of it, so a chroma sample serves a
+ * 2x2 of pixels. The odd-looking pair of cursors is the original's: it writes
+ * the pixel row above `acp` and the row at it in the same pass.
+ */
+void jbp_macroblock(uint8_t *pixels, int stride, int origin, int16_t block[6][64])
+{
+    static const int cbcr_base[4] = {0, 4, 32, 36};
+    int pass;
+    for (pass = 0; pass < 4; pass++) {
+        const int16_t *dy = block[pass];
+        int dcp = origin + (pass >> 1) * stride * 8 + (pass & 1) * 32;
+        int acp = dcp + stride;
+        int cbcr = cbcr_base[pass];
+        int y_src = 0, row, col;
+        for (row = 0; row < 4; row++) {
+            for (col = 0; col < 4; col++) {
+                int cb = block[4][cbcr], cr = block[5][cbcr];
+                int r = (cr * 0x166F0) >> 16;
+                int g = ((cb * 0x5810) >> 16) + ((cr * 0xB6C0) >> 16);
+                int b = (cb * 0x1C590) >> 16;
+                int c0 = dy[y_src] + 0x180, c1 = dy[y_src + 1] + 0x180;
+                int c8 = dy[y_src + 8] + 0x180, c9 = dy[y_src + 9] + 0x180;
+                pixels[dcp]              = clamp_ycc(c0 + b);
+                pixels[acp + 1 - stride] = clamp_ycc(c0 - g);
+                pixels[acp + 2 - stride] = clamp_ycc(c0 + r);
+                pixels[acp + 4 - stride] = clamp_ycc(c1 + b);
+                pixels[acp + 5 - stride] = clamp_ycc(c1 - g);
+                pixels[acp + 6 - stride] = clamp_ycc(c1 + r);
+                pixels[acp]              = clamp_ycc(c8 + b);
+                pixels[acp + 1]          = clamp_ycc(c8 - g);
+                pixels[acp + 2]          = clamp_ycc(c8 + r);
+                pixels[acp + 4]          = clamp_ycc(c9 + b);
+                pixels[acp + 5]          = clamp_ycc(c9 - g);
+                pixels[acp + 6]          = clamp_ycc(c9 + r);
+                y_src += 2;
+                dcp += 8;
+                acp += 8;
+                cbcr++;
+            }
+            dcp += stride * 2 - 32;
+            acp += stride * 2 - 32;
+            y_src += 8;
+            cbcr += 4;
+        }
+    }
+}
+
 /* -------------------------------------------------------------------- decode */
 
 int jbp_decode(const uint8_t *data, int size, int offset, jbp_result *out,
@@ -215,13 +275,13 @@ int jbp_decode(const uint8_t *data, int size, int offset, jbp_result *out,
     int data_pos, format, w, h, dc_bits, ac_bits;
     int aligned_w, aligned_h, blocks_x, blocks_y, stride, out_size;
     int tree_pos, quant_pos, bits_offset, total, i, x, y;
-    uint8_t tree_data[0x10];
+    uint8_t tree_data[JBP_RUN_TABLE];
     int32_t freq[0x20];
     int16_t quant_y[0x40], quant_c[0x40], block[6][64];
     int16_t *dc = NULL;
     uint8_t *pixels = NULL;
-    huffman tree_dc, tree_ac;
-    bitstream bits_dc, bits_ac;
+    jbp_huffman tree_dc, tree_ac;
+    jbp_bits bits_dc, bits_ac;
     int prev = 0;
 
     init_reverse();
@@ -254,13 +314,13 @@ int jbp_decode(const uint8_t *data, int size, int offset, jbp_result *out,
         return 0;
     }
 
-    for (i = 0; i < 0x10; i++) tree_data[i] = (uint8_t) (data[tree_pos + i] + 1);
+    for (i = 0; i < JBP_RUN_TABLE; i++) tree_data[i] = (uint8_t) (data[tree_pos + i] + 1);
     memset(freq, 0, sizeof freq);
     for (i = 0; i < 16; i++) freq[i] = i32(data, (size_t) data_pos + 4 * (size_t) i);
-    huffman_build(&tree_dc, tree_data, 0x10, freq);
+    jbp_huffman_build(&tree_dc, 0x10, freq);
     memset(freq, 0, sizeof freq);
     for (i = 0; i < 16; i++) freq[i] = i32(data, (size_t) data_pos + 0x40 + 4 * (size_t) i);
-    huffman_build(&tree_ac, tree_data, 0x10, freq);
+    jbp_huffman_build(&tree_ac, 0x10, freq);
 
     memset(quant_y, 0, sizeof quant_y);
     memset(quant_c, 0, sizeof quant_c);
@@ -271,10 +331,8 @@ int jbp_decode(const uint8_t *data, int size, int offset, jbp_result *out,
         }
     }
 
-    memset(&bits_dc, 0, sizeof bits_dc);
-    bits_dc.in = data; bits_dc.pos = bits_offset; bits_dc.end = bits_offset + dc_bits;
-    memset(&bits_ac, 0, sizeof bits_ac);
-    bits_ac.in = data; bits_ac.pos = bits_offset + dc_bits; bits_ac.end = bits_offset + dc_bits + ac_bits;
+    jbp_bits_init(&bits_dc, data, bits_offset, bits_offset + dc_bits);
+    jbp_bits_init(&bits_ac, data, bits_offset + dc_bits, bits_offset + dc_bits + ac_bits);
 
     total = blocks_x * blocks_y;
     dc = calloc((size_t) total * 6 + 1, sizeof *dc);
@@ -282,15 +340,13 @@ int jbp_decode(const uint8_t *data, int size, int offset, jbp_result *out,
     if (!dc || !pixels) { fail(err, errlen, "Out of memory decoding a JBP image"); goto bad; }
 
     for (i = 0; i < total * 6; i++) {
-        int n = huffman_read(&tree_dc, &bits_dc);
-        prev += signed_coeff(get_bits(&bits_dc, n), n);
+        int n = jbp_huffman_read(&tree_dc, &bits_dc);
+        prev += signed_coeff(jbp_bits_get(&bits_dc, n), n);
         dc[i] = (int16_t) prev;
         if (bits_dc.overrun) { fail(err, errlen, "JBP DC stream ended early"); goto bad; }
     }
 
     for (y = 0; y < blocks_y; y++) {
-        int dst1 = y * stride * 16;
-        int dst2 = dst1 + stride * 9;
         for (x = 0; x < blocks_x; x++) {
             int base = (y * blocks_x + x) * 6, n;
             memset(block, 0, sizeof block);
@@ -298,77 +354,31 @@ int jbp_decode(const uint8_t *data, int size, int offset, jbp_result *out,
                 int k = 0;
                 block[n][0] = dc[base + n];
                 while (k < 63) {
-                    int bit_count = huffman_read(&tree_ac, &bits_ac);
+                    int bit_count = jbp_huffman_read(&tree_ac, &bits_ac);
                     if (bits_ac.overrun) { fail(err, errlen, "JBP AC stream ended early"); goto bad; }
                     if (bit_count == 15) break;
                     if (bit_count == 0) {
                         int node = 0;
-                        while (get_bits(&bits_ac, 1)) {
+                        while (jbp_bits_get(&bits_ac, 1)) {
                             node++;
-                            if (node >= 0x10 || bits_ac.overrun) break;
+                            if (node >= JBP_RUN_TABLE || bits_ac.overrun) break;
                         }
-                        if (node >= 0x10) { fail(err, errlen, "Bad JBP AC run"); goto bad; }
+                        if (node >= JBP_RUN_TABLE) { fail(err, errlen, "Bad JBP AC run"); goto bad; }
                         k += tree_data[node];
                     } else {
-                        int v = signed_coeff(get_bits(&bits_ac, bit_count), bit_count);
-                        block[n][ZIGZAG[k]] = s16(v);
+                        int v = signed_coeff(jbp_bits_get(&bits_ac, bit_count), bit_count);
+                        block[n][jbp_zigzag[k]] = s16(v);
                         k++;
                     }
                 }
             }
-            idct(block[0], quant_y);
-            idct(block[1], quant_y);
-            idct(block[2], quant_y);
-            idct(block[3], quant_y);
-            idct(block[4], quant_c);
-            idct(block[5], quant_c);
-
-            {
-                static const int cbcr_base[4] = {0, 4, 32, 36};
-                int pass;
-                int dcs[4], acs[4];
-                dcs[0] = dst1;               acs[0] = dst1 + stride;
-                dcs[1] = dst1 + 32;          acs[1] = dst1 + stride + 32;
-                dcs[2] = dst2 - stride;      acs[2] = dst2;
-                dcs[3] = dst2 - stride + 32; acs[3] = dst2 + 32;
-                for (pass = 0; pass < 4; pass++) {
-                    const int16_t *dy = block[pass];
-                    int dcp = dcs[pass], acp = acs[pass], cbcr = cbcr_base[pass];
-                    int y_src = 0, row, col;
-                    for (row = 0; row < 4; row++) {
-                        for (col = 0; col < 4; col++) {
-                            int cb = block[4][cbcr], cr = block[5][cbcr];
-                            int r = (cr * 0x166F0) >> 16;
-                            int g = ((cb * 0x5810) >> 16) + ((cr * 0xB6C0) >> 16);
-                            int b = (cb * 0x1C590) >> 16;
-                            int c0 = dy[y_src] + 0x180, c1 = dy[y_src + 1] + 0x180;
-                            int c8 = dy[y_src + 8] + 0x180, c9 = dy[y_src + 9] + 0x180;
-                            pixels[dcp]              = clamp_ycc(c0 + b);
-                            pixels[acp + 1 - stride] = clamp_ycc(c0 - g);
-                            pixels[acp + 2 - stride] = clamp_ycc(c0 + r);
-                            pixels[acp + 4 - stride] = clamp_ycc(c1 + b);
-                            pixels[acp + 5 - stride] = clamp_ycc(c1 - g);
-                            pixels[acp + 6 - stride] = clamp_ycc(c1 + r);
-                            pixels[acp]              = clamp_ycc(c8 + b);
-                            pixels[acp + 1]          = clamp_ycc(c8 - g);
-                            pixels[acp + 2]          = clamp_ycc(c8 + r);
-                            pixels[acp + 4]          = clamp_ycc(c9 + b);
-                            pixels[acp + 5]          = clamp_ycc(c9 - g);
-                            pixels[acp + 6]          = clamp_ycc(c9 + r);
-                            y_src += 2;
-                            dcp += 8;
-                            acp += 8;
-                            cbcr++;
-                        }
-                        dcp += stride * 2 - 32;
-                        acp += stride * 2 - 32;
-                        y_src += 8;
-                        cbcr += 4;
-                    }
-                }
-            }
-            dst1 += 64;
-            dst2 += 64;
+            jbp_idct(block[0], quant_y);
+            jbp_idct(block[1], quant_y);
+            jbp_idct(block[2], quant_y);
+            jbp_idct(block[3], quant_y);
+            jbp_idct(block[4], quant_c);
+            jbp_idct(block[5], quant_c);
+            jbp_macroblock(pixels, stride, y * stride * 16 + x * 64, block);
         }
     }
 
