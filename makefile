@@ -65,10 +65,11 @@ $(BUILDDIR):
 
 # The tests need no display, no device and no network: they read the scheme
 # table and whatever real archives this machine happens to have.
-test: $(BUILDDIR)/test_schemes $(BUILDDIR)/test_saves $(BUILDDIR)/test_toolbar
+test: $(BUILDDIR)/test_schemes $(BUILDDIR)/test_saves $(BUILDDIR)/test_toolbar $(BUILDDIR)/test_movie
 	$(BUILDDIR)/test_schemes $(GAMES)
 	$(BUILDDIR)/test_saves $(SAVES) $(GAMES)
 	$(BUILDDIR)/test_toolbar $(GAMES)
+	$(BUILDDIR)/test_movie $(SAVES) $(GAMES)
 
 $(BUILDDIR)/test_schemes: tests/test_schemes.c $(LIBOBJECTS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -o $@ tests/test_schemes.c $(LIBOBJECTS) $(LDFLAGS)
@@ -78,6 +79,9 @@ $(BUILDDIR)/test_saves: tests/test_saves.c $(LIBOBJECTS) | $(BUILDDIR)
 
 $(BUILDDIR)/test_toolbar: tests/test_toolbar.c $(LIBOBJECTS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -o $@ tests/test_toolbar.c $(LIBOBJECTS) $(LDFLAGS)
+
+$(BUILDDIR)/test_movie: tests/test_movie.c $(LIBOBJECTS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -o $@ tests/test_movie.c $(LIBOBJECTS) $(LDFLAGS)
 
 run: all
 	$(BUILDDIR)/$(TARGET) $(GAME)
