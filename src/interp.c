@@ -79,6 +79,17 @@ struct cmvs_interp {
     int menu_last;
 
     /*
+     * The same thing for the in-game toolbar, which is the other family a
+     * press can reach: how many icons have been pressed and which the last
+     * one was. Nothing in the engine reads these either - they exist so that
+     * a run on a device can be read from its log, where a bar that answers
+     * and a bar that is dead look identical on a screenshot.
+     */
+    int icon_events;
+    int icon_last;
+    int icon_layer;
+
+    /*
      * The line the reader is on: how many message waits (command 0x153) have
      * been answered, and which layer's text object the last one was resting on.
      * Where the script is by pc is a number nobody can read; the line it is
@@ -1990,6 +2001,11 @@ static int command_builtin(cmvs_interp *in, int command)
         int hover = -1, click = 0, held = 0;
         cmvs_layer_hit(in->scene, arg(in, 1, 0), &in->input,
                        &hover, &click, &held);
+        if (click && hover >= 0) {
+            in->icon_events++;
+            in->icon_last = hover;
+            in->icon_layer = arg(in, 1, 0);
+        }
         in->sys[4] = hover;
         in->sys[5] = click;
         in->sys[6] = held;
@@ -3788,6 +3804,13 @@ int cmvs_interp_unimplemented(const cmvs_interp *in, int *distinct)
     }
     if (distinct) *distinct = kinds;
     return total;
+}
+
+int cmvs_interp_icon_events(const cmvs_interp *in, int *last_icon, int *last_layer)
+{
+    if (last_icon) *last_icon = in ? in->icon_last : -1;
+    if (last_layer) *last_layer = in ? in->icon_layer : -1;
+    return in ? in->icon_events : 0;
 }
 
 int cmvs_interp_switch(const cmvs_interp *in, int which)

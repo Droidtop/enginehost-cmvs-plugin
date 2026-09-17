@@ -294,6 +294,18 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeMenuEvents(JNIEnv *env, jclass 
     return (jint) ((count & 0xFFFF) | ((last & 0xFF) << 16));
 }
 
+/* The same packing for the in-game toolbar: how many icons have been pressed,
+ * then which icon and which layer, so one call answers the whole question. */
+JNIEXPORT jint JNICALL
+Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeIconEvents(JNIEnv *env, jclass klass, jlong handle)
+{
+    cmvs_session *session = (cmvs_session *) (intptr_t) handle;
+    int icon = -1, layer = -1, count;
+    if (session == NULL) return 0;
+    count = cmvs_session_icon_events(session, &icon, &layer);
+    return (jint) ((count & 0xFFFF) | ((icon & 0xFF) << 16) | ((layer & 0xFF) << 24));
+}
+
 JNIEXPORT void JNICALL
 Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeSound(JNIEnv *env, jclass klass,
                                                        jlong handle, jboolean sounding)

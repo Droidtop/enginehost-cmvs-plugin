@@ -139,6 +139,7 @@ int cmvs_session_unimplemented(const cmvs_session *s, int *distinct);
 int cmvs_session_sprite(const cmvs_session *s, int layer, int sprite,
                         int *x, int *y, int *w, int *h, int *worn);
 int cmvs_session_switch(const cmvs_session *s, int which);
+int cmvs_session_icon_events(const cmvs_session *s, int *last_icon, int *last_layer);
 long cmvs_session_command_calls(const cmvs_session *s, int command, int *known);
 
 #endif

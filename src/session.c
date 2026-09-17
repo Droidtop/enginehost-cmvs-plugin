@@ -256,3 +256,10 @@ long cmvs_session_command_calls(const cmvs_session *s, int command, int *known)
     if (known) *known = 0;
     return s ? cmvs_interp_command_calls(s->interp, command, known) : 0;
 }
+
+int cmvs_session_icon_events(const cmvs_session *s, int *last_icon, int *last_layer)
+{
+    if (last_icon) *last_icon = -1;
+    if (last_layer) *last_layer = -1;
+    return s ? cmvs_interp_icon_events(s->interp, last_icon, last_layer) : 0;
+}

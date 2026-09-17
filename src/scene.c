@@ -1084,7 +1084,16 @@ void cmvs_layer_present(cmvs_scene *s, int layer, int shown)
     cmvs_layer *l;
     if (!s || layer < 0 || layer >= CMVS_LAYERS) return;
     l = &s->layer[layer];
-    l->shown = shown ? 1 : 0;
+    shown = shown ? 1 : 0;
+    /*
+     * 0x00466d61: the command compares the flag with what the layer already
+     * carries and returns without touching anything when they are the same.
+     * That is not a saving, it is the difference between a script that says
+     * "show the message window" on every line and a player who has just taken
+     * the window away with the toolbar: the second flag survives.
+     */
+    if (l->shown == shown) return;
+    l->shown = shown;
     l->hidden = 0;
     cmvs_text_show(&s->text[layer], l->shown);
     cmvs_scene_show(s, CMVS_LAYER_OBJECT(layer), -1, l->shown);

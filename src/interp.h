@@ -139,6 +139,11 @@ void cmvs_interp_report(const cmvs_interp *in, void *out);
 #define CMVS_SWITCH_SKIP 0
 #define CMVS_SWITCH_AUTO 1
 #define CMVS_SWITCH_293C 2
+/* How many in-game toolbar icons have been pressed, and which the last one
+ * was. Same purpose as cmvs_interp_menu_events: a log line a device run can
+ * be read from. */
+int cmvs_interp_icon_events(const cmvs_interp *in, int *last_icon, int *last_layer);
+
 int cmvs_interp_switch(const cmvs_interp *in, int which);
 
 /* How many times a command has been called, and whether this engine answers

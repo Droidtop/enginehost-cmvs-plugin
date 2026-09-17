@@ -55,6 +55,10 @@ public final class CmvsPlugin implements EnginePlugin {
     /** So the log says when a menu item fired rather than repeating the count. */
     private int menuEvents;
 
+    /** And the same for the in-game toolbar, which is the other thing a press
+     * can reach. */
+    private int iconEvents;
+
     /** Each not-yet-implemented cmvs_* action, logged once. */
     private final java.util.Set<String> loggedUnimplemented = new java.util.HashSet<>();
     private String script = "";
@@ -259,6 +263,14 @@ public final class CmvsPlugin implements EnginePlugin {
             menuEvents = count;
             session.host().log(Log.INFO, "cmvs", "menu item " + (packed >> 16) + " selected", null);
         }
+        int icons = nativeIconEvents(engine);
+        int iconCount = icons & 0xFFFF;
+        if (iconCount != iconEvents) {
+            iconEvents = iconCount;
+            session.host().log(Log.INFO, "cmvs",
+                    "toolbar icon " + ((icons >> 16) & 0xFF)
+                            + " on layer " + ((icons >> 24) & 0xFF) + " pressed", null);
+        }
         String now = nativeScript(engine);
         if (now != null && !now.equals(script)) {
             script = now;
@@ -379,5 +391,7 @@ public final class CmvsPlugin implements EnginePlugin {
     private static native void nativeButton(long engine, int button, boolean down);
     private static native void nativeNavigate(long engine, int direction);
     private static native int nativeMenuEvents(long engine);
+
+    private static native int nativeIconEvents(long engine);
     private static native void nativeSound(long engine, boolean sounding);
 }
