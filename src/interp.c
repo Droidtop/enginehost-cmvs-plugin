@@ -3395,6 +3395,10 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
 {
     int t;
     if (!in->alive) return 0;
+    /* The device poll first: 0x0044BEC0, which 0x0045A8E0 makes before a
+     * statement of the frame runs, and which is where a press becomes visible
+     * to the script at all. src/input.h says why a touch press waits for it. */
+    cmvs_input_poll(&in->input);
     /* 0x0045A8E0 opens with exactly this: ten timers, each advanced by the
      * frame's elapsed time before a single statement runs. */
     for (t = 0; t < 10; t++) in->timer[t] += in->frame_ms;

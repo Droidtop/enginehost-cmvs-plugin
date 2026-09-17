@@ -69,12 +69,46 @@ typedef struct {
     int released, held, pressed;
 } cmvs_function;
 
+/* At most a press and its release can be waiting behind one pointer move. */
+#define CMVS_INPUT_QUEUE 2
+
 typedef struct {
     int x, y;                  /* the pointer, in engine coordinates */
     int have_pointer;          /* nothing has pointed at the screen yet */
+    int moved;                 /* the pointer moved since the last poll */
 
     cmvs_function fn[CMVS_FUNCTIONS];
+
+    /* Transitions held back for a later poll, in the order they arrived; see
+     * cmvs_input_poll. */
+    struct {
+        unsigned char function;
+        unsigned char down;
+        unsigned char wait;    /* polls still to pass before it is raised */
+    } queue[CMVS_INPUT_QUEUE];
+    int queued;
 } cmvs_input;
+
+/*
+ * The device poll, once at the top of every frame: 0x0044BEC0, which
+ * 0x0045A8E0 makes before a single statement of the frame runs. The original
+ * samples the mouse and the keyboard there, and that is where a press first
+ * becomes visible to the script.
+ *
+ * It is also what keeps a POINTER THAT TELEPORTS honest. A mouse cannot report
+ * a new position and a button going down in the same poll: the cursor is
+ * already where it is before the button is pressed, so the poll that first
+ * sees the button down is never the poll that first sees the position. A
+ * finger has no such history - ACTION_DOWN carries a position and a press
+ * together - and the game's own script counts on the difference: intproc.ps3's
+ * toolbar procedure decides which icon the pointer is on in one frame and only
+ * acts on a press in a later one, so a press delivered in the same poll as the
+ * move it arrived with is thrown away (measured: one poll of separation is
+ * enough, none is not). So a button transition raised in the same poll as a
+ * pointer move waits here for the next poll, one transition per poll, in the
+ * order it arrived. Nothing that arrives without a pointer move waits.
+ */
+void cmvs_input_poll(cmvs_input *in);
 
 /* What a frontend calls. `button` is 0 for the left button (a tap, confirm)
  * and 1 for the right one (cancel); both are functions here, the ones
