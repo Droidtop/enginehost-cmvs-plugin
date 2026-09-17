@@ -99,7 +99,18 @@ struct cmvs_interp {
         int slot;
         int pc;
         int32_t a, b, c;
+        int requested;           /* +0x33c8: one shot, cleared after every pass */
     } proc[64];
+
+    /*
+     * The two gates on the interrupt pass at 0x00457c70, which is what makes
+     * a registered procedure run by itself instead of only when 0x08a calls
+     * it. +0x33c4 (command 0x089) turns the pass on; +0x29d0 (command 0x08c)
+     * suppresses it, and every interrupt procedure sets one of the two on its
+     * own first statement so the pass cannot re-enter it.
+     */
+    int interrupts_on;           /* +0x33c4 */
+    int interrupts_held;         /* +0x29d0 */
 
     int32_t acc;                 /* +0x13d30 */
     int flag;                    /* +0x13d2c bit 0 */
@@ -2211,6 +2222,25 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = 1;
         return 0;
     }
+    case 0x089:
+        /*
+         * 0x004710ef: +0x33c4, the interrupt pass's own switch, set to 0 or 1
+         * from the argument. Every interrupt procedure clears it on its first
+         * statement and sets it again before it returns - that is what stops
+         * the pass from starting the same procedure inside itself.
+         */
+        in->interrupts_on = arg(in, 1, 0) != 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x08C:
+        /*
+         * 0x00471128: +0x29d0, the other gate. It suppresses the pass outright
+         * - the pass does not even push a context - and intproc.ps3's modal
+         * panel (procedure 26) holds it for as long as the panel is up.
+         */
+        in->interrupts_held = arg(in, 1, 0) != 0;
+        in->command_known[command] = 1;
+        return 0;
     case 0x08B: {   /* 0x00463610: forget the procedure again */
         int32_t which = arg(in, 1, 0);
         if (which >= 0 && which < 64) in->proc[which].used = 0;
@@ -2604,6 +2634,97 @@ const char *cmvs_interp_script(const cmvs_interp *in)
 
 void cmvs_interp_frame_ms(cmvs_interp *in, int ms) { in->frame_ms = ms; }
 
+/*
+ * THE INTERRUPT PASS: 0x00457c70, called from 0x0045a8e0 before every single
+ * statement the interpreter decodes.
+ *
+ * This is how CMVS runs a script alongside a script. `intproc.ps3` - the
+ * INTERRUPT PROCESS - registers twelve procedures with command 0x088 and then
+ * returns; the scene script never calls most of them, and the engine runs them
+ * out of this pass instead. The in-game toolbar is one of them, which is why
+ * it drew (the objects are built once) and then answered nothing: nothing was
+ * running the code that reads the pointer and acts on it.
+ *
+ * The pass walks the 64 registered slots with an index three lower than the
+ * slot number and a 26-entry table of trigger kinds at 0x00457fa4:
+ *
+ *   kind 0 (slots 3..6)    always
+ *   kind 1 (slots 10..17)  while display layer slot-10's object is there;
+ *                          0x00457d28 reads the pointer at +0xb68 + 4*slot,
+ *                          which for those eight slots is the layer table at
+ *                          +0xb90, and 0x00404a50 is the identity
+ *   kind 2 (slot 26)       while its own one-shot flag at +0x33c8 is set
+ *   kind 3                 never
+ *
+ * A firing procedure does not replace the current one: the pass first pushes
+ * the running context (repeat, pc, slot) on the data stack, then pushes one
+ * such triple per firing procedure, and finally pops the LAST one into the
+ * interpreter. So the highest-numbered one runs first and each 0x0414 return
+ * uncovers the next, with the interrupted script underneath them all - the
+ * same three words that pair with command 0x08a.
+ *
+ * Two gates keep it from re-entering: +0x33c4 (command 0x089) and +0x29d0
+ * (command 0x08c). Every one of ChronoClock's interrupt procedures sets one of
+ * them on its FIRST statement - procedure 6 at 0x5ec6e, procedure 17 at
+ * 0x303e0, procedure 26 at 0x66aca - and restores it before returning, which
+ * is the whole of the mutual exclusion. The one-shot flags are cleared at the
+ * end of every pass whether the pass ran or not (0x00457f76), so a request
+ * fires exactly once.
+ *
+ * The branch 0x00457de0 takes when +0x33c4 is zero - a single pending
+ * procedure at +0x36a0/+0x36a8 - is NOT implemented: nothing in ChronoClock
+ * reaches it, and a mechanism nothing exercises is a guess. When it matters it
+ * will show as an interrupt that never runs, not as one that runs wrongly.
+ */
+static const unsigned char interrupt_kind[26] = {
+    0, 0, 0, 0, 3, 3, 3, 1, 1, 1, 1, 1, 1, 1,
+    1, 3, 3, 3, 3, 3, 3, 3, 3, 2, 3, 0
+};
+
+static void interrupt_pass(cmvs_interp *in)
+{
+    int k;
+
+    if (in->interrupts_held || !in->interrupts_on) {
+        for (k = 0; k < 64; k++) in->proc[k].requested = 0;
+        return;
+    }
+
+    push(in, in->repeat);
+    push(in, in->pc);
+    push(in, in->current);
+
+    for (k = 0; k < 32; k++) {
+        int index = k - 3;
+        if (!in->proc[k].used) continue;
+        if (index < 0 || index >= (int) sizeof interrupt_kind) continue;
+        switch (interrupt_kind[index]) {
+        case 0:
+            break;
+        case 1:
+            if (!cmvs_scene_exists(in->scene, CMVS_LAYER_OBJECT(k - 10), -1)) continue;
+            break;
+        case 2:
+            if (!in->proc[k].requested) continue;
+            break;
+        default:
+            continue;
+        }
+        push(in, 0);
+        push(in, in->proc[k].pc);
+        push(in, in->proc[k].slot);
+    }
+
+    {
+        int slot = pop(in);
+        int back = pop(in);
+        in->repeat = pop(in);
+        if (slot >= 0 && slot < MAX_SLOTS && in->slot[slot].loaded) in->current = slot;
+        in->pc = back;
+    }
+    for (k = 0; k < 64; k++) in->proc[k].requested = 0;
+}
+
 int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
 {
     int t;
@@ -2615,6 +2736,14 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
      * elapsed milliseconds (0x00406a70) before it decides how much of the line
      * is due. */
     cmvs_scene_text_tick(in->scene, in->frame_ms);
+    /*
+     * 0x0045a90f, and its place matters: the pass runs ONCE, here, beside the
+     * ten timers, and the statement loop below re-enters at 0x0045a914 which
+     * is past it. Running it before every statement instead re-enters the
+     * procedure it just started on that procedure's own first statement,
+     * before the 0x089 it opens with can shut the pass off.
+     */
+    interrupt_pass(in);
     in->running = 1;
     while (in->running && budget-- > 0) {
         int op = word_at(in, in->pc);
