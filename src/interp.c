@@ -1922,7 +1922,16 @@ static int command_builtin(cmvs_interp *in, int command)
      * registered" and never registered one, and so there was nothing under the
      * pointer to press.
      */
-    case 0x14B:     /* 0x00466c50: is this layer there at all */
+    case 0x14B:
+        /*
+         * 0x00466c50: is the layer there. In the original a layer is the
+         * 0x9e4-byte object command 0x140 allocates, and 0x140 makes its
+         * graphic object at +0x9d8 in the same breath, so "the layer is there"
+         * and "the layer's object is there" are one fact. This engine has no
+         * 0x140 - the eight layers are always in the table and their objects
+         * are made when a script builds one - so the object is what it can
+         * answer about, and it is the same fact.
+         */
         in->sys[0] = cmvs_scene_exists(in->scene,
                                        CMVS_LAYER_OBJECT(arg(in, 1, 0)), -1);
         in->command_known[command] = 1;
