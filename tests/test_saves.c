@@ -336,10 +336,12 @@ static void test_shapes(void)
  * flags, the timers, the procedures) or carries it (the layers, the scene
  * parts, the backlog, the music).
  *
- * Two records are expected to differ and both are named: the thumbnail, which
- * is a picture of what OUR engine had on screen, and 0x283, which is four
- * bytes longer because we write all sixty-four global strings where the
- * original wrote sixty. Anything else differing is a real regression.
+ * ONE record is expected to differ and it is named: the thumbnail, which is a
+ * picture of what OUR engine had on screen. Anything else differing is a real
+ * regression - including 0x283, the sixty-four global strings, which used to
+ * be excused here as "four bytes longer than the original's sixty" and was in
+ * fact the whole of the load defects: there is no header dword in front of
+ * those strings, so reading one slid every string four slots down.
  */
 static void test_state(const char *dir, const char *game)
 {
@@ -400,7 +402,6 @@ static void test_state(const char *dir, const char *game)
     for (i = 0; i < theirs.records; i++) {
         cmvs_record *a = &theirs.rec[i];
         cmvs_record *b = cmvs_save_find(&ours, a->tag, a->index);
-        if (a->tag == 0x283) continue;          /* named above */
         if (!b) { printf("        0x%03x missing\n", a->tag); differences++; continue; }
         if (b->len != a->len || memcmp(a->data, b->data, (size_t) a->len) != 0) {
             printf("        0x%03x/%d differs (%d bytes vs %d)\n",
@@ -1088,7 +1089,43 @@ static int press_until(cmvs_session *s, int x, int y, int item, int cap)
     return 0;
 }
 
-static void test_load_screen(const char *dir, const char *game)
+/*
+ * The message window's LAID-OUT line, one row per line of the box: the glyphs
+ * the engine placed, in the places it placed them. A wrap that breaks inside a
+ * word, a plate grown to a few thousand pixels, or a line drawn one word to a
+ * row all show here and nowhere in the message TEXT, because
+ * cmvs_session_message concatenates the glyphs and loses the breaks.
+ */
+static void layout_of(const cmvs_session *s, int id, char *out, size_t outlen)
+{
+    const cmvs_text *t = cmvs_session_text(s, id);
+    size_t at = 0;
+    int i, last = -100000;
+
+    out[0] = 0;
+    if (!t) return;
+    at += (size_t) snprintf(out + at, outlen - at, "box %d x %d at (%d, %d) size %d:",
+                            t->rw, t->rh, t->rx, t->ry, t->size);
+    for (i = 0; i < t->glyphs && at + 8 < outlen; i++) {
+        unsigned c = t->glyph[i].code;
+        if (t->glyph[i].y != last) {
+            at += (size_t) snprintf(out + at, outlen - at, "\n  %4d | ", t->glyph[i].y);
+            last = t->glyph[i].y;
+        }
+        if (c < 0x80) out[at++] = (char) c;
+        else at += (size_t) snprintf(out + at, outlen - at, "<%04x>", c);
+        out[at] = 0;
+    }
+}
+
+/*
+ * `attract` walks the same load AFTER the title's attract sequence
+ * (cdemo.ps3) has started, which is the state the rig found mangled the first
+ * frame of a load. Both paths must lay the first line out identically; that
+ * comparison is the fixture, not a hard-coded string.
+ */
+static void test_load_screen_at(const char *dir, const char *game, int attract,
+                                char *layout, size_t layoutlen)
 {
     char err[256] = {0}, path[1024], saves[1024];
     cmvs_session *s;
@@ -1097,8 +1134,8 @@ static void test_load_screen(const char *dir, const char *game)
     int full[3], empty[3], apart;
     const cmvs_text *t;
 
-    printf("the Data Load screen, in %s\n", game);
-    snprintf(saves, sizeof saves, "%s/cmvs-loadscreen-test", game_scratch());
+    printf("the Data Load screen%s, in %s\n", attract ? " after the attract" : "", game);
+    snprintf(saves, sizeof saves, "%s/cmvs-loadscreen-test%d", game_scratch(), attract);
     s = cmvs_session_open(game, NULL, NULL, saves, err, sizeof err);
     if (!s) { printf("  --    %s\n", err); return; }
     for (i = 0; i < 400 && !cmvs_session_save_folder(s); i++)
@@ -1116,7 +1153,18 @@ static void test_load_screen(const char *dir, const char *game)
     snprintf(path, sizeof path, "%s/save001.dat", cmvs_session_save_folder(s));
     remove(path);
 
-    if (!press_until(s, 640, 470, LOAD_ITEM, 1200)) {
+    if (attract) {
+        /* The title starts cdemo.ps3 on its own after about fifty seconds of
+         * being left alone; this is that wait. */
+        for (i = 0; i < 8000; i++) {
+            if (cmvs_session_frame(s, err, sizeof err) <= 0) break;
+            if (!strcmp(cmvs_session_script(s), "cdemo.ps3")) break;
+        }
+        check(!strcmp(cmvs_session_script(s), "cdemo.ps3"),
+              "the title starts its attract sequence when it is left alone");
+    }
+
+    if (!press_until(s, 640, 470, LOAD_ITEM, 2000)) {
         check(0, "LOAD on the title screen answers");
         cmvs_session_close(s); return;
     }
@@ -1151,7 +1199,8 @@ static void test_load_screen(const char *dir, const char *game)
     for (i = 0; i < 400; i++) {
         const char *now = cmvs_session_script(s);
         if (now && strcmp(now, "menu.ps3") && strcmp(now, "intproc.ps3")
-            && strcmp(now, "intcode.ps3") && strcmp(now, "start.ps3")) break;
+            && strcmp(now, "intcode.ps3") && strcmp(now, "start.ps3")
+            && strcmp(now, "cdemo.ps3")) break;
         cmvs_session_frame(s, err, sizeof err);
     }
     printf("        after the load: %ld lines, in %s",
@@ -1173,8 +1222,86 @@ static void test_load_screen(const char *dir, const char *game)
                (unsigned) t->colour & 0xFFFFFFu, (unsigned) t->colour2 & 0xFFFFFFu);
         check(t->rw > 0 && t->rh > 0 && t->size > 0,
               "and it is boxed and sized rather than left at the defaults");
+        /*
+         * The plate the script sizes from its OWN wrap count. With the global
+         * strings shifted the script wrapped nothing and asked for a box
+         * thousands of pixels tall; four lines of 30-pixel text is 180.
+         */
+        check(t->rh > 0 && t->rh <= 720,
+              "and its box is a plausible height rather than thousands of pixels");
+    }
+    if (layout) layout_of(s, 7, layout, layoutlen);
+    cmvs_session_close(s);
+}
+
+/*
+ * The same message line, reached by READING to it from a new game rather than
+ * by loading a save. One confirm a frame, stopping on the line whose text
+ * contains `needle`; the layout that comes back is what a player who never
+ * saved would see, and it is the reference a load has to match.
+ */
+static void story_layout(const char *game, const char *needle,
+                         char *out, size_t outlen)
+{
+    char err[256] = {0}, line[1024], saves[1024];
+    cmvs_session *s;
+    int f;
+
+    out[0] = 0;
+    snprintf(saves, sizeof saves, "%s/cmvs-story-layout", game_scratch());
+    s = cmvs_session_open(game, NULL, NULL, saves, err, sizeof err);
+    if (!s) return;
+    for (f = 0; f < 4000; f++) {
+        cmvs_session_pointer(s, 640, 402);
+        cmvs_session_button(s, 0, 1);
+        cmvs_session_button(s, 0, 0);
+        if (cmvs_session_frame(s, err, sizeof err) <= 0) break;
+        if (cmvs_session_message(s, line, sizeof line) && strstr(line, needle)) {
+            layout_of(s, 7, out, outlen);
+            break;
+        }
     }
     cmvs_session_close(s);
+}
+
+/*
+ * THE TWO WAYS INTO A LOAD. The rig found that a load taken after the title's
+ * attract sequence had started drew its first frame mangled - one word to a
+ * line, literal `n` glyphs, a plate spanning the screen - while the same slot
+ * taken straight from the title drew correctly. Both are walked here through
+ * the game's own menus and the laid-out line is compared, so the two cannot
+ * drift apart again without a failure.
+ */
+static void test_load_screen(const char *dir, const char *game)
+{
+    char clean[4096], after[4096], story[4096];
+    const char *p = NULL;
+    int broken = 0;
+
+    test_load_screen_at(dir, game, 0, clean, sizeof clean);
+    test_load_screen_at(dir, game, 1, after, sizeof after);
+    printf("        clean path: %s\n", clean);
+    printf("        after the attract: %s\n", after);
+    check(clean[0] != 0, "the clean path lays the first line out");
+    check(strcmp(clean, after) == 0,
+          "and a load after the attract lays it out identically");
+
+    /*
+     * And the wrap itself, against the one authority there is: the same line
+     * reached by PLAYING to it. snky01.ps3 wraps its own lines - at spaces,
+     * in bytecode, dropping the space it breaks on - and hands the engine a
+     * string whose newlines are already in it, so the engine's width-only
+     * fallback should never fire. A row that ends mid-word ("closest to th" /
+     * "e sky") is that fallback firing, and it fires when the script's wrap
+     * loop was fed the wrong global string. Comparing the two paths says so
+     * without hard-coding a single line of English.
+     */
+    story_layout(game, "standing on the rooftop", story, sizeof story);
+    printf("        read to it instead: %s\n", story);
+    check(story[0] != 0, "the same line can be reached by reading from a new game");
+    check(strcmp(clean, story) == 0,
+          "and a load lays that line out exactly as reading to it does");
+    (void) p; (void) broken;
 }
 
 int main(int argc, char **argv)

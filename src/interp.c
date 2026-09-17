@@ -2830,19 +2830,19 @@ int cmvs_interp_frame(cmvs_interp *in, long budget, char *err, size_t errlen)
             int drop = word_at(in, in->pc + 2);
             in->pc = pop(in);
             in->sp -= drop;
-            if (in->sp < 4) in->sp = 4;
+            if (in->sp < 0) in->sp = 0;
             if (in->depth > 0) in->depth--;
             break;
         }
         case 0x0412:
             in->sp -= word_at(in, in->pc + 2);
-            if (in->sp < 4) in->sp = 4;
+            if (in->sp < 0) in->sp = 0;
             in->pc += 4;
             break;
         case 0x0413:
             in->pc = pop(in);
             in->sp -= 4 * (in->acc & 0xFFFF);
-            if (in->sp < 4) in->sp = 4;
+            if (in->sp < 0) in->sp = 0;
             if (in->depth > 0) in->depth--;
             break;
         case 0x0414: {
@@ -3172,23 +3172,20 @@ int cmvs_interp_capture(cmvs_interp *in, cmvs_save *out, char *err, size_t errle
     cmvs_save_set(out, 0x282, 0, in->flags, 256);
     {
         /*
-         * Global strings 0..63: one dword, then that many NUL-terminated
-         * strings back to back. The dword is 0 in the reference save, so it is
-         * NOT a byte count and nothing here writes one - it is carried when
-         * there is a record to carry it from.
-         *
-         * One difference from the original that is not understood and is not
-         * papered over: the reference record holds SIXTY strings in 297 bytes,
-         * and this writes all sixty-four, so the record comes out four bytes
-         * longer. The reader takes as many as the record's own length holds,
-         * so a longer one loses nothing; why the original stopped at sixty is
-         * unproven.
+         * GLOBAL STRINGS 0..63: sixty-four NUL-terminated strings back to
+         * back, and NOTHING in front of them. The first four bytes of the
+         * reference record are not a dword at all - they are global strings
+         * 0, 1, 2 and 3, all of them empty, and reading them as a header slid
+         * every string four slots down: the message the script had just put in
+         * global 20 came back in global 16, and global 9 - the copy the wrap
+         * loop reads - came back holding the "." that belongs in 17. Aligned,
+         * the reference record is exactly sixty-four strings in its 301 bytes,
+         * which is also why it looked like "sixty strings and four bytes
+         * short" before.
          */
-        const cmvs_record *was = cmvs_save_find(out, 0x283, 0);
-        uint8_t *strings = malloc(4 + 64 * (size_t) GSTRING_SIZE);
+        uint8_t *strings = malloc(64 * (size_t) GSTRING_SIZE);
         if (!strings) { cmvs_save_free(out); fail(err, errlen, "out of memory"); return 0; }
-        put32(strings, was && was->len >= 4 ? get32(was->data) : 0);
-        at = 4;
+        at = 0;
         for (i = 0; i < 64; i++) {
             size_t n = strlen(in->gstring[i]) + 1;
             memcpy(strings + at, in->gstring[i], n);
@@ -3358,8 +3355,8 @@ int cmvs_interp_restore(cmvs_interp *in, const cmvs_save *s, char *err, size_t e
     r = cmvs_save_find(s, 0x282, 0);
     if (r) memcpy(in->flags, r->data, (size_t) (r->len < 256 ? r->len : 256));
     r = cmvs_save_find(s, 0x283, 0);
-    if (r && r->len > 4) {
-        int at = 4;
+    if (r && r->len > 0) {
+        int at = 0;
         for (i = 0; i < 64 && at < r->len; i++) {
             snprintf(in->gstring[i], GSTRING_SIZE, "%s", (const char *) r->data + at);
             at += (int) strlen((const char *) r->data + at) + 1;
