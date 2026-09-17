@@ -797,19 +797,37 @@ int cmvs_scene_restore_object(cmvs_scene *s, int object, const uint8_t *data, in
 
 /*
  * A layer record, 0x0045D46B -> 0x00451B80. Its head is the text id and a
- * version of its own; then come the layer SETTINGS, which 0x00451BFD copies
- * raw into the layer object (0x270 dwords at version 3) and which are the
- * engine own in-memory layout rather than anything portable. This engine does
- * not have that layout and does not pretend to: the block is stepped over by
- * the length the original itself computes (0x9CC at 0x00451BFF, plus the four
- * bytes 0x00451CF0 adds), and what is applied is the graphic object behind it,
- * which is the same 0x00435710 record as a 0x700.
+ * version of its own; then come the layer's own SETTINGS, which 0x00451BFD
+ * copies raw over the layer object - 0x270 dwords, 0x9C0 bytes, at version 3 -
+ * and then the graphic object behind them, which is the same 0x00435710 record
+ * as a 0x700.
+ *
+ * That 0x9C0 block is the layer itself, and the part of it this engine models
+ * is read out field by field rather than memcpy'd, because the layout here is
+ * not the original's. It matters far more than "settings" suggests: the
+ * SPRITE TABLE is in it. A display layer's buttons are registered once, by the
+ * script that builds the bar, and a save taken afterwards is the only record
+ * of them - so a game loaded from the title had a toolbar that DREW, because
+ * the graphic object behind it was restored, and that could not be pressed and
+ * whose faces never changed, because the table beside it was not. That is what
+ * the rig saw on the device in builds 66, 67 and 68: fourteen presses landing
+ * on the right coordinates with nothing under them, and three icons wearing
+ * the disabled face because that is what they wore in the save.
+ *
+ * Offsets inside the block, from the entry layout at the head of this file and
+ * confirmed against the reference saves: the layer is at record + 0x0c
+ * (0x00451BE4 sets the cursor to 0x0c for versions 2 and 3), so +0x04 shown,
+ * +0x08 hidden, +0x0c and +0x10 the origin, and the table at +0x28, 32 entries
+ * of 0x4c: registered at +0x00, five states of six u16 from +0x04, the hit
+ * rectangle as four u16 at +0x40, the state worn at +0x48.
  */
 int cmvs_scene_restore_layer(cmvs_scene *s, int layer, const uint8_t *data, int len,
                              int *text_id)
 {
     unsigned id = 0, ver = 0;
-    int at;
+    int at, i;
+    cmvs_layer *l;
+
     if (!s || !data || len <= 0) return 0;
     if (layer < 0 || layer >= CMVS_LAYERS) return 0;
     if (!rd_u16(data, len, 0, &id) || !rd_u16(data, len, 2, &ver)) return 0;
@@ -819,6 +837,44 @@ int cmvs_scene_restore_layer(cmvs_scene *s, int layer, const uint8_t *data, int 
     if (ver != 3) return 0;
     at = 0x9CC + 4;
     if (at >= len) return 0;
+
+    l = &s->layer[layer];
+    {
+        const int body = 0x0c;
+        int32_t v;
+        if (rd_i32(data, len, body + 0x04, &v)) l->shown = v ? 1 : 0;
+        if (rd_i32(data, len, body + 0x08, &v)) l->hidden = v ? 1 : 0;
+        if (rd_i32(data, len, body + 0x0c, &v)) l->x = (int) v;
+        if (rd_i32(data, len, body + 0x10, &v)) l->y = (int) v;
+        for (i = 0; i < CMVS_LAYER_SPRITES; i++) {
+            int e = body + 0x28 + i * 0x4c, k;
+            cmvs_sprite *sp = &l->sprite[i];
+            unsigned w;
+            int32_t v2;
+            if (e + 0x4c > len) break;
+            memset(sp, 0, sizeof *sp);
+            if (rd_i32(data, len, e, &v2)) sp->on = v2 ? 1 : 0;
+            for (k = 0; k < CMVS_SPRITE_STATES; k++) {
+                int f = e + 0x04 + k * 12;
+                if (rd_u16(data, len, f + 0, &w)) sp->sx[k] = (int) w;
+                if (rd_u16(data, len, f + 2, &w)) sp->sy[k] = (int) w;
+                if (rd_u16(data, len, f + 4, &w)) sp->sw[k] = (int) w;
+                if (rd_u16(data, len, f + 6, &w)) sp->sh[k] = (int) w;
+                if (rd_u16(data, len, f + 8, &w)) sp->ox[k] = (int) w;
+                if (rd_u16(data, len, f + 10, &w)) sp->oy[k] = (int) w;
+            }
+            if (rd_u16(data, len, e + 0x40, &w)) sp->x = (int) w;
+            if (rd_u16(data, len, e + 0x42, &w)) sp->y = (int) w;
+            if (rd_u16(data, len, e + 0x44, &w)) sp->w = (int) w;
+            if (rd_u16(data, len, e + 0x46, &w)) sp->h = (int) w;
+            if (rd_i32(data, len, e + 0x48, &v2)) sp->worn = (int) v2;
+        }
+        /* +0x9e0, the sprite a press began on, is not in the block the record
+         * carries - it is past its 0x9C0 - and a press cannot be in flight
+         * across a load anyway. */
+        l->press_from = -1;
+    }
+
     return cmvs_scene_restore_object(s, CMVS_LAYER_OBJECT(layer), data + at, len - at);
 }
 

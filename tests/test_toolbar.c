@@ -279,19 +279,222 @@ static void test_queries(const char *game, const char *saves)
     cmvs_session_close(s);
 }
 
+/*
+ * THE BAR AFTER A LOAD, which is the only way the rig ever reaches it.
+ *
+ * Everything above plays to the scene by READING to it, and that is why the
+ * desktop and the device disagreed for three builds. A game loaded from the
+ * title arrives in the same scene with two things missing that reading never
+ * loses: the layer's SPRITE TABLE, which is registered once by the script that
+ * builds the bar and afterwards lives only in the save (record 0x400, the
+ * layer's own 0x9C0 block, 0x00451BFD), and the INTERRUPT GATE at +0x33c4 -
+ * the first dword of record 0x10b - which intproc.ps3 shuts off with command
+ * 0x089 while the Data Load screen runs and which a load takes the pc away
+ * from before the statement that would turn it back on.
+ *
+ * Without the first the bar drew and nothing could be pressed. Without the
+ * second the procedure behind it never ran at all, so its faces stayed
+ * whatever they were in the save. Both are checked here, against the same walk
+ * the rig makes: title, LOAD, slot 001, YES.
+ */
+#define LOAD_ITEM        3
+#define SLOT1_ITEM      70
+#define CONFIRM_YES      1
+#define SLOT1_X         44
+#define SLOT1_Y        199
+#define TILE_W         192
+#define TILE_H         108
+#define YES_X          530
+#define YES_Y          368
+
+/*
+ * The icons the bar greys in the state save000.dat resumes into, which is the
+ * set the rig expected and did not get. The bar works all five out from the
+ * engine's own state - nothing here is a constant the engine also holds - and
+ * with the gate clear it could answer none of them.
+ */
+static const int DISABLED_AFTER_LOAD[] = { 1, 3, 4, 7, 11, -1 };
+
+static int press_until(cmvs_session *s, int x, int y, int item, int cap)
+{
+    char e[256] = {0};
+    int f, last = -1, before, now;
+    before = cmvs_session_menu_events(s, &last);
+    for (f = 0; f < cap; f++) {
+        cmvs_session_pointer(s, x, y);
+        if (f % 40 == 0) cmvs_session_button(s, 0, 1);
+        if (f % 40 == 2) cmvs_session_button(s, 0, 0);
+        if (cmvs_session_frame(s, e, sizeof e) <= 0) return 0;
+        now = cmvs_session_menu_events(s, &last);
+        if (now > before && last == item) return 1;
+    }
+    return 0;
+}
+
+static int put_reference_save(const char *dir, const char *folder)
+{
+    char from[1024], to[1024];
+    FILE *a, *b;
+    unsigned char buf[65536];
+    size_t n;
+    snprintf(from, sizeof from, "%s/save000.dat", dir);
+    a = fopen(from, "rb");
+    if (!a) return 0;
+    snprintf(to, sizeof to, "%s/save000.dat", folder);
+    b = fopen(to, "wb");
+    if (!b) { fclose(a); return 0; }
+    while ((n = fread(buf, 1, sizeof buf, a)) > 0) fwrite(buf, 1, n, b);
+    fclose(a);
+    fclose(b);
+    return 1;
+}
+
+static void test_after_a_load(const char *game, const char *dir)
+{
+    char err2[256] = {0};
+    const char *saves = "/tmp/cmvs-toolbar-loaded";
+    cmvs_session *s;
+    int i, n = 0, worn[CMVS_LAYER_SPRITES], seen[CMVS_LAYER_SPRITES];
+    int wrong = 0;
+
+    printf("the in-game toolbar after a load, in %s\n", game);
+    if (!dir) { printf("  ....  no reference saves on this machine\n"); return; }
+
+    s = cmvs_session_open(game, NULL, NULL, saves, err2, sizeof err2);
+    if (!s) { check(0, "the game opens for the load walk"); return; }
+    for (i = 0; i < 400 && !cmvs_session_save_folder(s); i++)
+        cmvs_session_frame(s, err2, sizeof err2);
+    if (!cmvs_session_save_folder(s)
+        || !put_reference_save(dir, cmvs_session_save_folder(s))) {
+        printf("  ....  no save000.dat in %s\n", dir);
+        cmvs_session_close(s);
+        return;
+    }
+    for (i = 0; i < 100; i++) cmvs_session_frame(s, err2, sizeof err2);
+
+    if (!press_until(s, 640, 470, LOAD_ITEM, 2000)) {
+        check(0, "LOAD on the title answers"); cmvs_session_close(s); return;
+    }
+    for (i = 0; i < 200; i++) cmvs_session_frame(s, err2, sizeof err2);
+    if (!press_until(s, SLOT1_X + TILE_W / 2, SLOT1_Y + TILE_H / 2, SLOT1_ITEM, 1200)) {
+        check(0, "slot 001 answers"); cmvs_session_close(s); return;
+    }
+    for (i = 0; i < 200; i++) cmvs_session_frame(s, err2, sizeof err2);
+    if (!press_until(s, YES_X, YES_Y, CONFIRM_YES, 1200)) {
+        check(0, "the confirmation panel answers"); cmvs_session_close(s); return;
+    }
+    for (i = 0; i < 400; i++) {
+        const char *now = cmvs_session_script(s);
+        if (now && strcmp(now, "menu.ps3") && strcmp(now, "intproc.ps3")
+            && strcmp(now, "intcode.ps3") && strcmp(now, "start.ps3")) break;
+        cmvs_session_frame(s, err2, sizeof err2);
+    }
+    check(!strcmp(cmvs_session_script(s), "snky01.ps3"), "the load lands in the story");
+    read_on(s, 120);
+
+    for (i = 0; i < CMVS_LAYER_SPRITES; i++) {
+        seen[i] = cmvs_session_sprite(s, TOOLBAR_LAYER, i, NULL, NULL, NULL, NULL, &worn[i]);
+        if (seen[i]) n++;
+    }
+    printf("        %d sprites on layer %d after the load\n", n, TOOLBAR_LAYER);
+    check(n == 14, "the save's own sprite table comes back with the picture");
+
+    {
+        long polls = cmvs_session_command_calls(s, 0x194, NULL);
+        printf("        the bar polled its sprites %ld times since the load\n", polls);
+        check(polls > 0, "and the interrupt pass behind it is running again");
+    }
+
+    for (i = 0; DISABLED_AFTER_LOAD[i] >= 0; i++) {
+        int icon = DISABLED_AFTER_LOAD[i];
+        if (!seen[icon] || worn[icon] != 3) wrong++;
+    }
+    for (i = 0; i < CMVS_LAYER_SPRITES; i++) {
+        int expected = 0, k;
+        if (!seen[i]) continue;
+        /*
+         * VOICE PLAYBACK is left out of the second half of the comparison.
+         * Its face follows whether the line being read has a voice, and this
+         * engine has no voice subsystem behind KEY_FUNCTION_12, so it greys
+         * and un-greys as the scene reads on. What the check is about is the
+         * five that must be grey and the seven that must not.
+         */
+        if (i == 9) continue;
+        for (k = 0; DISABLED_AFTER_LOAD[k] >= 0; k++)
+            if (DISABLED_AFTER_LOAD[k] == i) expected = 1;
+        if (!expected && worn[i] == 3) wrong++;
+    }
+    printf("        faces:");
+    for (i = 0; i < CMVS_LAYER_SPRITES; i++) if (seen[i]) printf(" %d:%d", i, worn[i]);
+    printf("\n");
+    check(wrong == 0,
+          "and it greys SAVE, QUICK SAVE, QUICK LOAD, PREVIOUS CHOICE and PAUSE GAME");
+
+    /*
+     * And a press is taken. DYNAMIC TEXT BOX is the icon used, not AUTO MODE:
+     * switching auto advance on makes the message read on by itself, which is
+     * the very thing the second check is looking for.
+     */
+    {
+        int x, y, w, h, icon = -1, layer = -1, before_events;
+        long before = cmvs_session_messages(s);
+        before_events = cmvs_session_icon_events(s, &icon, &layer);
+        {
+            char e2[256]; int f2; long idle_before = cmvs_session_messages(s);
+            for (f2 = 0; f2 < 12; f2++) cmvs_session_frame(s, e2, sizeof e2);
+            printf("        twelve frames with NOTHING pressed: %ld -> %ld lines", idle_before,
+                   cmvs_session_messages(s));
+            putchar(10);
+            before = cmvs_session_messages(s);
+        }
+        if (cmvs_session_sprite(s, TOOLBAR_LAYER, 10, &x, &y, &w, &h, NULL)) {
+            press(s, x + w / 2, y + h / 2);
+            printf("        DYNAMIC TEXT BOX: icon events %d -> %d, last icon %d on layer %d\n",
+                   before_events, cmvs_session_icon_events(s, &icon, &layer), icon, layer);
+            check(cmvs_session_icon_events(s, &icon, &layer) > before_events,
+                  "a press on the bar is taken after a load too");
+            check(icon == 10 && layer == TOOLBAR_LAYER,
+                  "and it is the icon the press landed on");
+            printf("        lines %ld -> %ld", before, cmvs_session_messages(s));
+            putchar(10);
+            check(cmvs_session_messages(s) == before,
+                  "and it does not fall through to the message");
+        }
+    }
+    cmvs_session_close(s);
+}
+
 int main(int argc, char **argv)
 {
     int i;
     const char *saves = "/tmp/cmvs-toolbar-test";
+    const char *reference = NULL;
     if (argc < 2) {
         printf("no game folder given; nothing to check\n");
         printf("\n%d checks, %d failed\n", checks, failures);
         return 0;
     }
+    /* A folder with a cmvs.cfg in it is a game; the other one is the
+     * reference saves, the same way test_saves tells its arguments apart. */
     for (i = 1; i < argc; i++) {
+        char probe[1024];
+        FILE *f;
+        snprintf(probe, sizeof probe, "%s/cmvs.cfg", argv[i]);
+        f = fopen(probe, "rb");
+        if (f) fclose(f);
+        else if (!reference) reference = argv[i];
+    }
+    for (i = 1; i < argc; i++) {
+        char probe[1024];
+        FILE *f;
+        snprintf(probe, sizeof probe, "%s/cmvs.cfg", argv[i]);
+        f = fopen(probe, "rb");
+        if (!f) continue;
+        fclose(f);
         test_toolbar(argv[i], saves);
         test_press(argv[i], saves);
         test_queries(argv[i], saves);
+        test_after_a_load(argv[i], reference);
     }
     printf("\n%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

@@ -68,7 +68,7 @@ $(BUILDDIR):
 test: $(BUILDDIR)/test_schemes $(BUILDDIR)/test_saves $(BUILDDIR)/test_toolbar $(BUILDDIR)/test_touch $(BUILDDIR)/test_movie
 	$(BUILDDIR)/test_schemes $(GAMES)
 	$(BUILDDIR)/test_saves $(SAVES) $(GAMES)
-	$(BUILDDIR)/test_toolbar $(GAMES)
+	$(BUILDDIR)/test_toolbar $(SAVES) $(GAMES)
 	$(BUILDDIR)/test_touch $(GAMES)
 	$(BUILDDIR)/test_movie $(SAVES) $(GAMES)
 

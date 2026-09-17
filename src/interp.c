@@ -2419,6 +2419,10 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = 1;
         return 0;
     case 0x196:     /* 0x004688d0 */
+        if (getenv("CMVS_WEAR") && arg(in, 3, 2) == 7)
+            fprintf(stderr, "WEAR layer %d sprite %d state %d at pc %06x in %s\n",
+                    arg(in, 3, 2), arg(in, 3, 1), arg(in, 3, 0), in->pc,
+                    in->slot[in->current].name);
         cmvs_layer_sprite_wear(in->scene, arg(in, 3, 2), arg(in, 3, 1),
                                arg(in, 3, 0));
         in->command_known[command] = 1;
@@ -2595,7 +2599,17 @@ static int command_builtin(cmvs_interp *in, int command)
          * window's own buttons through the hit test at 0x00452a80.
          */
         cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
-        int click = cmvs_input_pressed(&in->input, CMVS_FN_CONFIRM);
+        /*
+         * The RELEASE, not the press: 0x00452CCB calls 0x00448B20, which is
+         * KEY_FUNCTION_01's RELEASED edge with HELD handed back, and the wait
+         * acts on that. It matters because the in-game toolbar's own poll runs
+         * first, in the interrupt pass, and consumes the confirm edge on the
+         * release (0x00452B76). Read on the PRESS instead and the bar can take
+         * a press and the line can advance underneath it on the same tap,
+         * which is exactly what the rig saw: an icon that answered and a
+         * message that read on anyway.
+         */
+        int click = cmvs_input_released(&in->input, CMVS_FN_CONFIRM, NULL);
         in->message_layer = arg(in, 3, 2);
         if (click) {
             /* 0x00448B50, which is what the original calls the moment it has
@@ -3779,6 +3793,21 @@ static void restore_procs(cmvs_interp *in, const uint8_t *data, int len)
 {
     int i;
     if (len < PROC_BYTES) return;
+    /*
+     * The record's FIRST dword is +0x33c4, the gate the whole interrupt pass
+     * hangs on (0x00457c86 returns outright when it is zero), and it has to
+     * come back with the table behind it. It is what the Data Load screen
+     * leaves CLEAR: intproc.ps3 shuts the pass off with command 0x089 while
+     * its own menu runs, and a load takes the pc away to the saved script
+     * before the statement that would turn it back on is ever reached. So a
+     * game loaded from the title ran with no interrupt pass at all - the
+     * in-game toolbar was the restored picture of one, drawing the faces the
+     * save was taken with, answering nothing, and letting every press fall
+     * through to the message underneath. That is the whole of what the rig saw
+     * on the device in builds 66, 67 and 68, and it is why the desktop, which
+     * reaches the scene by READING to it, never showed it.
+     */
+    in->interrupts_on = get32(data) != 0;
     for (i = 0; i < 64; i++) {
         const uint8_t *e = data + 4 + i * PROC_ENTRY;
         in->proc[i].slot = get32(e + 0x04);
