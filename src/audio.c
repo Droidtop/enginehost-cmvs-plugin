@@ -117,23 +117,19 @@ static double clamp_volume(int volume)
     return volume / 255.0;
 }
 
-int cmvs_audio_play(cmvs_audio *audio, int kind, int bank, const char *name,
-                    int loop, int volume)
+/*
+ * Starts a bank on a buffer the mixer takes ownership of. Both entry points end
+ * here: one has read a file by name, the other has been handed the bytes out of
+ * a .cmv's own container.
+ */
+static int start_owned(cmvs_audio *audio, int kind, int bank, uint8_t *file,
+                       int size, int loop, int volume)
 {
-    uint8_t *file;
-    int size = 0, error = 0;
+    int error = 0;
     stb_vorbis *decoder;
     stb_vorbis_info info;
     channel *slot;
-    char why[256];
 
-    if (!audio || !name || !name[0]) return 0;
-    if (!slot_of(audio, kind, bank)) return 0;
-
-    /* Read and decode outside the lock: this touches the card and takes a
-     * while, and the mixer must not stall on a scene loading its music. */
-    file = cmvs_game_sound(audio->game, name, &size, why, sizeof why);
-    if (!file) return 0;
     decoder = stb_vorbis_open_memory(file, size, &error, NULL);
     if (!decoder) {
         free(file);
@@ -157,6 +153,36 @@ int cmvs_audio_play(cmvs_audio *audio, int kind, int bank, const char *name,
     slot->target = slot->volume;
     pthread_mutex_unlock(&audio->lock);
     return 1;
+}
+
+int cmvs_audio_play(cmvs_audio *audio, int kind, int bank, const char *name,
+                    int loop, int volume)
+{
+    uint8_t *file;
+    int size = 0;
+    char why[256];
+
+    if (!audio || !name || !name[0]) return 0;
+    if (!slot_of(audio, kind, bank)) return 0;
+    /* Read and decode outside the lock: this touches the card and takes a
+     * while, and the mixer must not stall on a scene loading its music. */
+    file = cmvs_game_data(audio->game, name, &size, why, sizeof why);
+    if (!file) return 0;
+    return start_owned(audio, kind, bank, file, size, loop, volume);
+}
+
+int cmvs_audio_play_memory(cmvs_audio *audio, int kind, int bank,
+                           const uint8_t *data, int size, int loop, int volume)
+{
+    uint8_t *copy;
+    if (!audio || !data || size <= 0) return 0;
+    if (!slot_of(audio, kind, bank)) return 0;
+    /* The mixer outlives the caller's buffer - a movie's file is freed the
+     * moment command 0x30a drops the player - so the bytes are copied. */
+    copy = malloc((size_t) size);
+    if (!copy) return 0;
+    memcpy(copy, data, (size_t) size);
+    return start_owned(audio, kind, bank, copy, size, loop, volume);
 }
 
 void cmvs_audio_stop(cmvs_audio *audio, int kind, int bank, int ms)

@@ -355,8 +355,8 @@ static void index_loose(cmvs_game *g)
     index_folder(g, g->folder, 0);
 }
 
-uint8_t *cmvs_game_sound(cmvs_game *g, const char *name, int *size_out,
-                         char *err, size_t errlen)
+uint8_t *cmvs_game_data(cmvs_game *g, const char *name, int *size_out,
+                        char *err, size_t errlen)
 {
     char why[512];
     int i;
@@ -379,7 +379,7 @@ uint8_t *cmvs_game_sound(cmvs_game *g, const char *name, int *size_out,
         return cpz_read(g->archive[i], e, size_out, err, errlen);
     }
 
-    snprintf(why, sizeof why, "no sound named %.200s in the game", name);
+    snprintf(why, sizeof why, "no file named %.200s in the game", name);
     fail(err, errlen, why);
     return NULL;
 }

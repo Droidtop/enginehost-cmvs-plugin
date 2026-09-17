@@ -61,6 +61,15 @@ void cmvs_audio_set_rate(cmvs_audio *audio, int rate);
 int cmvs_audio_play(cmvs_audio *audio, int kind, int bank, const char *name,
                     int loop, int volume);
 
+/*
+ * The same from bytes already in memory, which is how a MOVIE's sound is
+ * played: a .cmv keeps its Ogg Vorbis track in the last entry of its own frame
+ * table, and 0x00431a41 hands it straight to the effect subsystem on bank
+ * slot + 2. The bytes are copied, so the caller keeps its buffer.
+ */
+int cmvs_audio_play_memory(cmvs_audio *audio, int kind, int bank,
+                           const uint8_t *data, int size, int loop, int volume);
+
 /* Stops a bank over `ms` milliseconds - the unit the fade commands are written
  * in (0x0a2 asks for 2000). Zero stops it at once. */
 void cmvs_audio_stop(cmvs_audio *audio, int kind, int bank, int ms);
