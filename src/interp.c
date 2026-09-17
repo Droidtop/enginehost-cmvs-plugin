@@ -112,6 +112,32 @@ struct cmvs_interp {
     int interrupts_on;           /* +0x33c4 */
     int interrupts_held;         /* +0x29d0 */
 
+    /*
+     * The engine's own switches, each a cell with one command that reads it
+     * and one that writes it, and every one of them is something the in-game
+     * toolbar both shows and sets:
+     *
+     *   +0x5b8  TEXT SKIP   0x2eb reads and writes, and 0x152, 0x153, 0x15c,
+     *                       0x224, 0x22b, 0x233, 0x235, 0x271, 0x2c7 and
+     *                       0x2ef all read it
+     *   +0x5d8  0x2e5 reads and writes, and nothing else in the command table
+     *           touches it, so the script owns it outright
+     *   +0x293c 0x2ce reads, 0x2cd writes (0x00472327), same shape
+     *   +0x634  0x2ee reads whether it is set (0x00472498); 0x13a, 0x13c,
+     *           0x13d, 0x2b5 and 0x2b6 are what would set it, and none of the
+     *           five is implemented, so it is never set here
+     *   device +0x56c  0x34e reads it (0x00449000) and 0x34f clears it
+     *           (0x00449010). The key layer writes 0, 2 or 3 into it from the
+     *           device state at +0x930/+0x934/+0x938 (0x0044CC91, 0x0044CCA3,
+     *           0x0044CCB5); no frontend here raises any of the three, so it
+     *           reads zero exactly as an unbound key function does.
+     */
+    int skip;                    /* +0x5b8 */
+    int setting_5d8;
+    int cell_293c;
+    int cell_634;
+    int device_56c;
+
     int32_t acc;                 /* +0x13d30 */
     int flag;                    /* +0x13d2c bit 0 */
     int32_t sys[16];             /* +0x13d34 onwards, what token 0x10F reads */
@@ -1620,30 +1646,6 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = t != NULL;
         return 0;
     }
-    case 0x150:
-        /*
-         * 0x00466df0 -> 0x00452750, and it is NOT the text box: it moves the
-         * whole LAYER. The routine writes the layer's own x and y at +0xc and
-         * +0x10 and hands the same pair to the layer's graphic object
-         * (0x00433340) and to its text object (0x004503e0, which scales the
-         * pair by +0x144/+0x14c first). Mode 1 adds to what is there, mode 0
-         * replaces it, and the box and the pen are never touched.
-         *
-         * What was here before moved the BOX and, because 0x00450420 puts the
-         * pen back to the box's corner, took the pen with it: snky01.ps3's
-         * second line asks for (-1174, -2853) and every glyph of it landed
-         * two and a half screens above the window. Doing nothing is closer to
-         * the engine than doing the wrong thing, and it leaves the line where
-         * 0x145 and 0x14f put it - inside the message window.
-         *
-         * Acting on it properly means giving the layer a position of its own
-         * and finding what computes the argument: the same call site asks for
-         * (595, 612) the first time round and (295, -198) the second, and
-         * neither is where this game's message window sits, so a command that
-         * is still missing is feeding it. Left unimplemented, and counted as
-         * such, until that is known.
-         */
-        return 0;
     case 0x152: { /* 0x00466e90 -> 0x004523e0 -> 0x00451120: write the line */
         cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
         const char *text = string_text(in, arg(in, 3, 0));
@@ -1895,6 +1897,249 @@ static int command_builtin(cmvs_interp *in, int command)
         in->command_known[command] = 1;
         return 0;
     }
+    /* ------------------------------------------- THE IN-GAME TOOLBAR
+     *
+     * intproc.ps3 registers twelve interrupt procedures and the seventeenth is
+     * the bar across the top of every scene: SYSTEM, SAVE, LOAD, QUICK SAVE,
+     * QUICK LOAD, AUTO MODE, TEXT SKIP, PREVIOUS CHOICE, NEXT CHOICE, VOICE
+     * PLAYBACK, DYNAMIC TEXT BOX, PAUSE GAME. It draws its icons as parts of
+     * layer 7's graphic object and it presses them through the LAYER'S OWN
+     * sprite table - a second, smaller family beside the menus, described in
+     * scene.h. Every command below is one question that procedure asks once or
+     * more per frame; with them unanswered sys[0] kept whatever the previous
+     * command had left in it, the procedure read "this sprite is already
+     * registered" and never registered one, and so there was nothing under the
+     * pointer to press.
+     */
+    case 0x14B:     /* 0x00466c50: is this layer there at all */
+        in->sys[0] = cmvs_scene_exists(in->scene,
+                                       CMVS_LAYER_OBJECT(arg(in, 1, 0)), -1);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x14C:     /* 0x00466ce0 -> 0x00452690: take the layer away */
+        cmvs_layer_hide(in->scene, arg(in, 2, 1), arg(in, 2, 0) != 0);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x14D:     /* 0x00466c90: and whether it has been taken away */
+        in->sys[0] = cmvs_layer_hidden(in->scene, arg(in, 1, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x14E:     /* 0x00466d30 -> 0x00452550: show the layer */
+        cmvs_layer_present(in->scene, arg(in, 2, 1), arg(in, 2, 0) != 0);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x150:     /* 0x00466df0 -> 0x00452750: the layer's own origin */
+        cmvs_layer_move(in->scene, arg(in, 4, 3), arg(in, 4, 2),
+                        arg(in, 4, 1), arg(in, 4, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x15F:     /* 0x00467290 -> 0x004527c0 */
+        in->sys[0] = cmvs_layer_hit_rect(in->scene, arg(in, 5, 4), &in->input,
+                                         arg(in, 5, 3), arg(in, 5, 2),
+                                         arg(in, 5, 1), arg(in, 5, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x18D: {
+        /*
+         * 0x00467be0: everything the script can ask about one drawn thing.
+         * 0x00451d30 turns the second argument into either the layer's own
+         * object (below zero) or that part of it, and then the six fields come
+         * straight off its draw item: +0x44 the alpha into sys[0], +0x20 and
+         * +0x24 the position into sys[1] and sys[2], +0x28 the draw order into
+         * sys[3], and the two scales at +0x48 and +0x4c into sys[8] and sys[9]
+         * as the four bytes they are - sys is an integer storage in the
+         * original too (token 0x10F goes through _ftol), so a script that
+         * wants them reads the bits.
+         */
+        int layer = arg(in, 2, 1), part = arg(in, 2, 0);
+        int x = 0, y = 0, depth = 0, alpha = 0;
+        float sx = 1.0f, sy = 1.0f;
+        cmvs_scene_item_read(in->scene, CMVS_LAYER_OBJECT(layer), part,
+                             &x, &y, &depth, &alpha, &sx, &sy);
+        in->sys[0] = alpha;
+        in->sys[1] = x;
+        in->sys[2] = y;
+        in->sys[3] = depth;
+        in->sys[8] = as_bits(sx);
+        in->sys[9] = as_bits(sy);
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x190:     /* 0x004686a0 -> 0x00452960: one state of one sprite */
+        cmvs_layer_sprite_state(in->scene, arg(in, 9, 8), arg(in, 9, 7),
+                                arg(in, 9, 6), arg(in, 9, 5), arg(in, 9, 4),
+                                arg(in, 9, 3), arg(in, 9, 2), arg(in, 9, 1),
+                                arg(in, 9, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x191:     /* 0x00468710 -> 0x004529c0: and where it can be pressed */
+        cmvs_layer_sprite_rect(in->scene, arg(in, 6, 5), arg(in, 6, 4),
+                               arg(in, 6, 3), arg(in, 6, 2),
+                               arg(in, 6, 1), arg(in, 6, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x192:     /* 0x00468770 -> 0x00452a00 */
+        cmvs_layer_sprite_show(in->scene, arg(in, 2, 1), arg(in, 2, 0), 1);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x193:     /* 0x004687c0 -> 0x00452a40 */
+        cmvs_layer_sprite_show(in->scene, arg(in, 2, 1), arg(in, 2, 0), 0);
+        in->command_known[command] = 1;
+        return 0;
+    case 0x194: {   /* 0x00468810 -> 0x00452a80: THE PRESS */
+        int hover = -1, click = 0, held = 0;
+        cmvs_layer_hit(in->scene, arg(in, 1, 0), &in->input,
+                       &hover, &click, &held);
+        in->sys[4] = hover;
+        in->sys[5] = click;
+        in->sys[6] = held;
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x195:     /* 0x00468870 */
+        in->sys[0] = cmvs_layer_sprite_on(in->scene, arg(in, 2, 1), arg(in, 2, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x196:     /* 0x004688d0 */
+        cmvs_layer_sprite_wear(in->scene, arg(in, 3, 2), arg(in, 3, 1),
+                               arg(in, 3, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x197:     /* 0x004689a0 */
+        in->sys[0] = cmvs_layer_sprite_worn(in->scene, arg(in, 2, 1),
+                                            arg(in, 2, 0));
+        in->command_known[command] = 1;
+        return 0;
+    case 0x19A: {
+        /*
+         * 0x004719be -> 0x0044f000, which zeroes four early triples and then
+         * tail-calls 0x00448930: every one of the twenty-four functions' two
+         * EDGES, released and pressed, cleared together. A procedure calls it
+         * when it has decided the frame's input belongs to it, so that nothing
+         * downstream spends the same press again.
+         */
+        int i;
+        for (i = 0; i < CMVS_FUNCTIONS; i++) cmvs_input_clear(&in->input, i);
+        in->command_known[command] = 1;
+        return 0;
+    }
+    /*
+     * Three more of the twenty-four, read exactly as 0x1a0 reads function 01:
+     * the RELEASED edge into sys[0] and HELD into sys[4]. Which function each
+     * one is comes from the offset its accessor reads, against the table
+     * 0x00448930 lays out (function n at +0x430 + 12n):
+     *   0x1a8  0x00468b60 -> 0x00448cf0, +0x484 - function 07, hide window
+     *   0x1aa  0x00468ba0 -> 0x00448d20, +0x4a8 - function 10, auto advance
+     *   0x1ae  0x00468c20 -> 0x00448d80, +0x4c0 - function 12, voice replay
+     */
+    case 0x1A8: case 0x1AA: case 0x1AE: {
+        int fn = command == 0x1A8 ? CMVS_FN_HIDE_WINDOW
+               : command == 0x1AA ? CMVS_FN_AUTO : CMVS_FN_VOICE;
+        int held = 0;
+        in->sys[0] = cmvs_input_released(&in->input, fn, &held) ? 1 : 0;
+        in->sys[4] = held ? 1 : 0;
+        in->command_known[command] = 1;
+        return 0;
+    }
+    case 0x130:
+        /*
+         * 0x004661d0 -> 0x00453280: how many lines the BACKLOG holds. The list
+         * is the one at +0xc10, command 0x136 appends to it and 0x12f empties
+         * it; neither is implemented, so the list is empty and 0x00453280
+         * counts an empty list as none. That is the answer, not an omission -
+         * but it is also why the bar's history buttons have nothing to offer.
+         */
+        in->sys[0] = 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x226:
+        /*
+         * 0x0046a3e0, and it is THE GATE THE WHOLE TOOLBAR HANGS ON. The
+         * object at +0xca8 is the screen shake: command 0x225 makes one
+         * (0x0046a320 -> 0x004468c0, a 0x28-byte record of mode, period,
+         * duration and amplitude), 0x20c asks whether it has finished, 0x228
+         * waits for it and 0x229 throws it away. 0x226 answers its amplitude
+         * less the part already spent (+0xc - +0x1c, 0x00446d00), and with NO
+         * object at all it answers -1 outright (0x0046a3ff).
+         *
+         * -1 is the answer that matters. intproc.ps3's toolbar procedure
+         * starts with `if (0x226() >= 0) enabled = 0` at pc 0x304f8, so while
+         * the screen is shaking the bar is off and the rest of the time it is
+         * on. A command that left sys[0] alone answered 1 - whatever command
+         * 0x2ce had just put there - and turned the bar off for the whole
+         * game.
+         *
+         * The shake itself is not modelled; see BRIEF, "Next".
+         */
+        in->sys[0] = -1;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x281:
+        /*
+         * 0x0046e480 -> 0x00411fd0 on the stopwatch at +0xce0: it answers the
+         * count at +8 while the watch is running and -1 (0x00411fdb) while it
+         * is not. Command 0x282 is what starts it and is not implemented, so
+         * it is not running.
+         */
+        in->sys[0] = -1;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2CD:     /* 0x00472327 */
+        in->cell_293c = arg(in, 1, 0) != 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2CE:     /* 0x0047234c */
+        in->sys[0] = in->cell_293c;
+        in->command_known[command] = 1;
+        return 0;
+    /*
+     * 0x2e5 and 0x2eb are one command each, not two: the LAST argument says
+     * which way it runs. Zero reads the flag into sys[0] (0x0046b8b5,
+     * 0x0046bb05) and anything else writes the first argument's truth into it
+     * (0x0046b8cc, 0x0046bb1c).
+     */
+    case 0x2E5:
+        if (arg(in, 2, 1) == 0) in->sys[0] = in->setting_5d8 != 0;
+        else in->setting_5d8 = arg(in, 2, 0) != 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2EB:
+        if (arg(in, 2, 1) == 0) in->sys[0] = in->skip != 0;
+        else in->skip = arg(in, 2, 0) != 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x2EE:     /* 0x00472498 */
+        in->sys[0] = in->cell_634 != 0;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x34E:     /* 0x0047276b -> 0x00449000 */
+        in->sys[0] = in->device_56c;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x34F:     /* 0x00472775 -> 0x00449010 */
+        in->device_56c = 0;
+        in->command_known[command] = 1;
+        return 0;
+    /*
+     * The last two questions of the frame belong to the GESTURE recogniser at
+     * +0xcbc, which this engine does not have, and both answer what the
+     * recogniser's own reset (0x004474a0) leaves behind:
+     *   0x353  0x0046e7e0 -> 0x00418c30, its +0x2c, which the reset sets to -1
+     *   0x359  0x0046e8c0 -> 0x00447330, which returns +0x50 and reports
+     *          through its out-parameter whether +0x4c is set. With +0x48 and
+     *          +0x4c both zero - nothing is being drawn - it writes zero into
+     *          +0x50 on the way past and answers zero.
+     * This is the same ground command 0x362 already stands on.
+     */
+    case 0x353:
+        in->sys[0] = -1;
+        in->command_known[command] = 1;
+        return 0;
+    case 0x359:
+        in->sys[0] = 0;
+        in->sys[4] = 0;
+        in->command_known[command] = 1;
+        return 0;
     case 0x34A:
         /*
          * 0x00469020 -> 0x00448f00: virtual button 20 (+0x52c), one of the
@@ -3543,6 +3788,25 @@ int cmvs_interp_unimplemented(const cmvs_interp *in, int *distinct)
     }
     if (distinct) *distinct = kinds;
     return total;
+}
+
+int cmvs_interp_switch(const cmvs_interp *in, int which)
+{
+    if (!in) return 0;
+    switch (which) {
+    case CMVS_SWITCH_SKIP: return in->skip;
+    case CMVS_SWITCH_AUTO: return in->setting_5d8;
+    case CMVS_SWITCH_293C: return in->cell_293c;
+    default: return 0;
+    }
+}
+
+long cmvs_interp_command_calls(const cmvs_interp *in, int command, int *known)
+{
+    if (known) *known = 0;
+    if (!in || command < 0 || command >= COMMANDS) return 0;
+    if (known) *known = in->command_known[command];
+    return in->command_seen[command];
 }
 
 void cmvs_interp_report(const cmvs_interp *in, void *out)

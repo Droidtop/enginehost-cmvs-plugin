@@ -131,4 +131,14 @@ void cmvs_session_budget(cmvs_session *s, long statements_per_frame);
 void cmvs_session_report(const cmvs_session *s, void *out);
 int cmvs_session_unimplemented(const cmvs_session *s, int *distinct);
 
+/*
+ * The in-game toolbar, without a screen. A display layer's sprites are what
+ * intproc.ps3 builds its bar out of (see scene.h); this reports one of them as
+ * the engine holds it, and the two switches the bar's own buttons write.
+ */
+int cmvs_session_sprite(const cmvs_session *s, int layer, int sprite,
+                        int *x, int *y, int *w, int *h, int *worn);
+int cmvs_session_switch(const cmvs_session *s, int which);
+long cmvs_session_command_calls(const cmvs_session *s, int command, int *known);
+
 #endif

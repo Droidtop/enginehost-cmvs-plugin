@@ -36,6 +36,8 @@
 #include <stdint.h>
 
 #include "camera.h"
+#include "input.h"
+#include "input.h"
 #include "game.h"
 #include "text.h"
 
@@ -234,6 +236,165 @@ int cmvs_scene_restore_text(cmvs_scene *s, int id, const uint8_t *data, int len)
 int cmvs_scene_restore_object(cmvs_scene *s, int object, const uint8_t *data, int len);
 int cmvs_scene_restore_layer(cmvs_scene *s, int layer, const uint8_t *data, int len,
                              int *text_id);
+
+/*
+ * THE LAYER'S OWN SPRITES, which is what the in-game toolbar is made of.
+ *
+ * A display layer is a 0x9e4-byte object of its own (allocated by command
+ * 0x140 at 0x004665e0) and NOT a graphic object: the graphic object it draws
+ * with hangs off it at +0x9d8. Inside it, at +0x28, is a table of 32 entries
+ * of 0x4c bytes, and that table is a button bar:
+ *
+ *   entry + 0x00   on        1 while the sprite is registered (0x00452a00
+ *                            sets it, 0x00452a40 clears it, and both show or
+ *                            hide part (i + 0x10) of the layer's object with
+ *                            it - so sprite i IS part i+16)
+ *   entry + 0x04   five states of six words apiece, at +0x2c + 12*state:
+ *                  sx, sy, sw, sh, ox, oy (0x00452960)
+ *   entry + 0x40   x, y, w, h as u16 (0x004529c0), the HIT rectangle, taken
+ *                  from the layer's own origin at +0xc/+0x10
+ *   entry + 0x48   the state the sprite is wearing (0x004688d0 writes it and
+ *                  0x004689a0 reads it)
+ *
+ * and the layer keeps the sprite a press began on at +0x9e0.
+ *
+ * 0x00452a80 is the poll over that table and it is the same contract
+ * cmvs_menu_poll transcribes for the menu family: a press remembers where it
+ * began, a release counts only where it began, and the pointer decides what
+ * is under it. It answers three things - which sprite the pointer is over,
+ * whether one was clicked, and whether one is held.
+ */
+#define CMVS_LAYER_SPRITES 0x20   /* the bound 0x00468870 and 0x004686a0 check */
+#define CMVS_SPRITE_STATES 5      /* (0x68 - 0x2c) / 12, the room between the
+                                   * states and the hit rectangle */
+#define CMVS_LAYER_PART(sprite) ((sprite) + 0x10)  /* 0x00452a0b */
+
+/* Commands 0x14e (0x00452550) and 0x14c (0x00452690): the script showing the
+ * layer, and the player taking it away again. 0x14d reads the second flag. */
+void cmvs_layer_present(cmvs_scene *s, int layer, int shown);
+void cmvs_layer_hide(cmvs_scene *s, int layer, int hidden);
+int cmvs_layer_hidden(const cmvs_scene *s, int layer);
+
+/* Commands 0x190 and 0x191 (0x00452960, 0x004529c0). */
+void cmvs_layer_sprite_state(cmvs_scene *s, int layer, int sprite, int state,
+                             int sx, int sy, int sw, int sh, int ox, int oy);
+void cmvs_layer_sprite_rect(cmvs_scene *s, int layer, int sprite,
+                            int x, int y, int w, int h);
+
+/* Commands 0x192 and 0x193 (0x00452a00, 0x00452a40): register or drop the
+ * sprite, and show or hide the part that draws it with it. */
+void cmvs_layer_sprite_show(cmvs_scene *s, int layer, int sprite, int on);
+
+/* The sprite as it stands, for a test and for a log line: what the engine put
+ * in the entry rather than what the script asked for. Answers 0 when the
+ * sprite is not registered. */
+int cmvs_layer_sprite_read(const cmvs_scene *s, int layer, int sprite,
+                           int *x, int *y, int *w, int *h, int *worn);
+
+/* Command 0x195 (0x00468870): is sprite i of this layer registered. */
+int cmvs_layer_sprite_on(const cmvs_scene *s, int layer, int sprite);
+
+/* Command 0x196 (0x004688d0): wear a state - which copies that state's source
+ * rectangle onto part i+16, and does nothing at all when it is already worn. */
+void cmvs_layer_sprite_wear(cmvs_scene *s, int layer, int sprite, int state);
+
+/* Command 0x197 (0x004689a0): which state it is wearing. */
+int cmvs_layer_sprite_worn(const cmvs_scene *s, int layer, int sprite);
+
+/* Command 0x150 (0x00452750): where the layer's origin is. Mode 0 is absolute,
+ * mode 1 adds to where it already is, and anything else takes the x for both
+ * (which is the original's own fall-through, not a guess). */
+void cmvs_layer_move(cmvs_scene *s, int layer, int mode, int x, int y);
+void cmvs_layer_origin(const cmvs_scene *s, int layer, int *x, int *y);
+
+/* Command 0x194 (0x00452a80). Returns whether the pointer is over any sprite;
+ * *hover is the sprite it is over (-1 for none), *click whether one was
+ * clicked, *held whether the button is down over one. It CONSUMES the confirm
+ * edge exactly where the original does. */
+int cmvs_layer_hit(cmvs_scene *s, int layer, cmvs_input *in,
+                   int *hover, int *click, int *held);
+
+/* Command 0x18d (0x00467be0): the draw item's position, order, alpha and the
+ * two scales, for the layer's own object (part below zero) or one of its
+ * parts. Every field is left as the caller set it when there is no item. */
+void cmvs_scene_item_read(const cmvs_scene *s, int object, int part,
+                          int *x, int *y, int *depth, int *alpha,
+                          float *scale_x, float *scale_y);
+
+/* Command 0x15f (0x004527c0): is the pointer inside this rectangle of the
+ * layer, the layer's origin included. */
+int cmvs_layer_hit_rect(const cmvs_scene *s, int layer, const cmvs_input *in,
+                        int x, int y, int w, int h);
+
+/*
+ * THE LAYER'S OWN SPRITES, which is what the in-game toolbar is made of.
+ *
+ * A display layer is a 0x9e4-byte object of its own (allocated by command
+ * 0x140 at 0x004665e0) and NOT a graphic object: the graphic object it draws
+ * with hangs off it at +0x9d8. Inside it, at +0x28, is a table of 32 entries
+ * of 0x4c bytes, and that table is a button bar:
+ *
+ *   entry + 0x00   on        1 while the sprite is registered (0x00452a00
+ *                            sets it, 0x00452a40 clears it, and both show or
+ *                            hide part (i + 0x10) of the layer's object with
+ *                            it - so sprite i IS part i+16)
+ *   entry + 0x04   five states of six words apiece, at +0x2c + 12*state:
+ *                  sx, sy, sw, sh, ox, oy (0x00452960)
+ *   entry + 0x40   x, y, w, h as u16 (0x004529c0), the HIT rectangle, taken
+ *                  from the layer's own origin at +0xc/+0x10
+ *   entry + 0x48   the state the sprite is wearing (0x004688d0 writes it and
+ *                  0x004689a0 reads it)
+ *
+ * and the layer keeps the sprite a press began on at +0x9e0.
+ *
+ * 0x00452a80 is the poll over that table and it is the same contract
+ * cmvs_menu_poll transcribes for the menu family: a press remembers where it
+ * began, a release counts only where it began, and the pointer decides what
+ * is under it. It answers three things - which sprite the pointer is over,
+ * whether one was clicked, and whether one is held.
+ */
+#define CMVS_LAYER_SPRITES 0x20   /* the bound 0x00468870 and 0x004686a0 check */
+#define CMVS_SPRITE_STATES 5      /* (0x68 - 0x2c) / 12, the room between the
+                                   * states and the hit rectangle */
+#define CMVS_LAYER_PART(sprite) ((sprite) + 0x10)  /* 0x00452a0b */
+
+/* Commands 0x190 and 0x191 (0x00452960, 0x004529c0). */
+void cmvs_layer_sprite_state(cmvs_scene *s, int layer, int sprite, int state,
+                             int sx, int sy, int sw, int sh, int ox, int oy);
+void cmvs_layer_sprite_rect(cmvs_scene *s, int layer, int sprite,
+                            int x, int y, int w, int h);
+
+/* Commands 0x192 and 0x193 (0x00452a00, 0x00452a40): register or drop the
+ * sprite, and show or hide the part that draws it with it. */
+void cmvs_layer_sprite_show(cmvs_scene *s, int layer, int sprite, int on);
+
+/* Command 0x195 (0x00468870): is sprite i of this layer registered. */
+int cmvs_layer_sprite_on(const cmvs_scene *s, int layer, int sprite);
+
+/* Command 0x196 (0x004688d0): wear a state - which copies that state's source
+ * rectangle onto part i+16, and does nothing at all when it is already worn. */
+void cmvs_layer_sprite_wear(cmvs_scene *s, int layer, int sprite, int state);
+
+/* Command 0x197 (0x004689a0): which state it is wearing. */
+int cmvs_layer_sprite_worn(const cmvs_scene *s, int layer, int sprite);
+
+/* Command 0x150 (0x00452750): where the layer's origin is. Mode 0 is absolute,
+ * mode 1 adds to where it already is, and anything else takes the x for both
+ * (which is the original's own fall-through, not a guess). */
+void cmvs_layer_move(cmvs_scene *s, int layer, int mode, int x, int y);
+void cmvs_layer_origin(const cmvs_scene *s, int layer, int *x, int *y);
+
+/* Command 0x194 (0x00452a80). Returns whether the pointer is over any sprite;
+ * *hover is the sprite it is over (-1 for none), *click whether one was
+ * clicked, *held whether the button is down over one. It CONSUMES the confirm
+ * edge exactly where the original does. */
+int cmvs_layer_hit(cmvs_scene *s, int layer, cmvs_input *in,
+                   int *hover, int *click, int *held);
+
+/* Command 0x15f (0x004527c0): is the pointer inside this rectangle of the
+ * layer, the layer's origin included. */
+int cmvs_layer_hit_rect(const cmvs_scene *s, int layer, const cmvs_input *in,
+                        int x, int y, int w, int h);
 
 /* What is on screen, for the runner to report without a window. */
 int cmvs_scene_drawn(const cmvs_scene *s);

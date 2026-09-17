@@ -127,4 +127,22 @@ long cmvs_interp_statements(const cmvs_interp *in);
 int cmvs_interp_unimplemented(const cmvs_interp *in, int *distinct);
 void cmvs_interp_report(const cmvs_interp *in, void *out);
 
+/*
+ * The engine's own switches, named by the command that owns each one:
+ *   0  TEXT SKIP, +0x5b8, command 0x2eb
+ *   1  the flag command 0x2e5 owns at +0x5d8, which the toolbar's AUTO MODE
+ *      writes
+ *   2  +0x293c, command 0x2cd/0x2ce
+ * Nothing in the engine reads them from here; they are for a test and for a
+ * log line that says what the bar did with a press.
+ */
+#define CMVS_SWITCH_SKIP 0
+#define CMVS_SWITCH_AUTO 1
+#define CMVS_SWITCH_293C 2
+int cmvs_interp_switch(const cmvs_interp *in, int which);
+
+/* How many times a command has been called, and whether this engine answers
+ * it. A test asserts over these rather than over a printed report. */
+long cmvs_interp_command_calls(const cmvs_interp *in, int command, int *known);
+
 #endif

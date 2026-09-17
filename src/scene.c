@@ -43,6 +43,30 @@ typedef struct cmvs_object {
     struct cmvs_object **part;   /* CMVS_PARTS pointers, allocated with the object */
 } cmvs_object;
 
+/*
+ * A DISPLAY LAYER, the 0x9e4-byte object command 0x140 allocates at
+ * 0x004665e0. Only the half this engine has anything to do with is here: the
+ * origin at +0xc/+0x10, the 32-entry sprite table at +0x28 and the sprite a
+ * press began on at +0x9e0. The graphic object the layer draws with is the
+ * one at +0x9d8, which lives in the same table as the 256 script objects.
+ */
+typedef struct {
+    int on;                                  /* entry +0x00 */
+    int sx[CMVS_SPRITE_STATES], sy[CMVS_SPRITE_STATES];
+    int sw[CMVS_SPRITE_STATES], sh[CMVS_SPRITE_STATES];
+    int ox[CMVS_SPRITE_STATES], oy[CMVS_SPRITE_STATES];   /* entry +0x2c */
+    int x, y, w, h;                          /* entry +0x68, the hit rectangle */
+    int worn;                                /* entry +0x70 */
+} cmvs_sprite;
+
+typedef struct {
+    int shown;                               /* +0x04, command 0x14e */
+    int hidden;                              /* +0x08, command 0x14c */
+    int x, y;                                /* +0x0c, +0x10 */
+    cmvs_sprite sprite[CMVS_LAYER_SPRITES];  /* +0x28 */
+    int press_from;                          /* +0x9e0 */
+} cmvs_layer;
+
 struct cmvs_scene {
     cmvs_game *game;
     int width, height;
@@ -52,6 +76,7 @@ struct cmvs_scene {
      * accessor and there is nothing to tell apart below that call. */
     cmvs_object *object[CMVS_OBJECTS + CMVS_LAYERS];
     cmvs_camera camera[CMVS_CAMERAS];
+    cmvs_layer layer[CMVS_LAYERS];
     cmvs_text text[CMVS_LAYERS];
     /*
      * The table at +0xbb0 holds twelve text objects. An entry is either a
@@ -106,6 +131,8 @@ cmvs_scene *cmvs_scene_new(cmvs_game *game, int width, int height)
     for (i = 0; i < CMVS_LAYERS; i++) cmvs_text_init(&s->text[i]);
     for (i = 0; i < CMVS_TEXT_IDS; i++) s->of_id[i] = -1;
     for (i = 0; i < CMVS_CAMERAS; i++) cmvs_camera_init(&s->camera[i]);
+    /* +0x9e0 starts at -1: 0x00452a80 reads it as "no press is in flight". */
+    for (i = 0; i < CMVS_LAYERS; i++) s->layer[i].press_from = -1;
     return s;
 }
 
@@ -1042,4 +1069,230 @@ const uint8_t *cmvs_scene_compose(cmvs_scene *s, int *width, int *height)
     return s->frame;
 }
 
+/* ------------------------------------------------------- showing a layer */
+
+/*
+ * Two flags and they are not the same one. 0x00452550 (command 0x14e) is the
+ * script SHOWING the layer: it writes +0x04 and clears +0x08. 0x00452690
+ * (command 0x14c) is the player HIDING it - the message window the toolbar
+ * and KEY_FUNCTION_07 take away - and it refuses outright while +0x04 is
+ * clear, because there is nothing to take away. Both end by showing or hiding
+ * the layer's own graphic object and its text object together.
+ */
+void cmvs_layer_present(cmvs_scene *s, int layer, int shown)
+{
+    cmvs_layer *l;
+    if (!s || layer < 0 || layer >= CMVS_LAYERS) return;
+    l = &s->layer[layer];
+    l->shown = shown ? 1 : 0;
+    l->hidden = 0;
+    cmvs_text_show(&s->text[layer], l->shown);
+    cmvs_scene_show(s, CMVS_LAYER_OBJECT(layer), -1, l->shown);
+    /* and a layer that has just been shown is put back at its own origin
+     * (0x00452587 -> 0x004503e0), which is where its text is drawn from. */
+    if (l->shown) cmvs_text_at(&s->text[layer], l->x, l->y);
+}
+
+void cmvs_layer_hide(cmvs_scene *s, int layer, int hidden)
+{
+    cmvs_layer *l;
+    if (!s || layer < 0 || layer >= CMVS_LAYERS) return;
+    l = &s->layer[layer];
+    if (!l->shown) return;          /* 0x00452696 */
+    l->hidden = hidden ? 1 : 0;
+    cmvs_text_show(&s->text[layer], !l->hidden);
+    cmvs_scene_show(s, CMVS_LAYER_OBJECT(layer), -1, !l->hidden);
+}
+
+int cmvs_layer_hidden(const cmvs_scene *s, int layer)
+{
+    if (!s || layer < 0 || layer >= CMVS_LAYERS) return 0;
+    return s->layer[layer].hidden;
+}
+
+/* ------------------------------------------------- the layer's own sprites */
+
+static cmvs_sprite *sprite_of(cmvs_scene *s, int layer, int i)
+{
+    /* The two bounds every one of these commands checks before it touches
+     * anything: 0x004686b3 for the layer and 0x004686c3 for the sprite. */
+    if (!s || layer < 0 || layer >= CMVS_LAYERS) return NULL;
+    if (i < 0 || i >= CMVS_LAYER_SPRITES) return NULL;
+    return &s->layer[layer].sprite[i];
+}
+
+void cmvs_layer_sprite_state(cmvs_scene *s, int layer, int sprite, int state,
+                             int sx, int sy, int sw, int sh, int ox, int oy)
+{
+    cmvs_sprite *e = sprite_of(s, layer, sprite);
+    if (!e || state < 0 || state >= CMVS_SPRITE_STATES) return;
+    e->sx[state] = (int16_t) sx;   /* 0x00452960 stores every one as a word */
+    e->sy[state] = (int16_t) sy;
+    e->sw[state] = (int16_t) sw;
+    e->sh[state] = (int16_t) sh;
+    e->ox[state] = (int16_t) ox;
+    e->oy[state] = (int16_t) oy;
+}
+
+void cmvs_layer_sprite_rect(cmvs_scene *s, int layer, int sprite,
+                            int x, int y, int w, int h)
+{
+    cmvs_sprite *e = sprite_of(s, layer, sprite);
+    if (!e) return;
+    /* 0x004529c0 keeps the rectangle as four UNSIGNED words, which is why a
+     * sprite is never placed left of or above its layer's own origin. */
+    e->x = (uint16_t) x;
+    e->y = (uint16_t) y;
+    e->w = (uint16_t) w;
+    e->h = (uint16_t) h;
+}
+
+void cmvs_layer_sprite_show(cmvs_scene *s, int layer, int sprite, int on)
+{
+    cmvs_sprite *e = sprite_of(s, layer, sprite);
+    if (!e) return;
+    e->on = on ? 1 : 0;
+    /* and the part that draws it goes with it: 0x00452a00 asks the layer's own
+     * object for part (i + 0x10) and calls the same 0x00432b70 command 0x215
+     * uses. A layer whose object is not there yet simply has nothing to show. */
+    cmvs_scene_show(s, CMVS_LAYER_OBJECT(layer), CMVS_LAYER_PART(sprite), e->on);
+}
+
+int cmvs_layer_sprite_on(const cmvs_scene *s, int layer, int sprite)
+{
+    const cmvs_sprite *e = sprite_of((cmvs_scene *) s, layer, sprite);
+    return e ? (e->on != 0) : 0;
+}
+
+int cmvs_layer_sprite_read(const cmvs_scene *s, int layer, int sprite,
+                           int *x, int *y, int *w, int *h, int *worn)
+{
+    const cmvs_sprite *e = sprite_of((cmvs_scene *) s, layer, sprite);
+    if (!e || !e->on) return 0;
+    if (x) *x = s->layer[layer].x + e->x;
+    if (y) *y = s->layer[layer].y + e->y;
+    if (w) *w = e->w;
+    if (h) *h = e->h;
+    if (worn) *worn = e->worn;
+    return 1;
+}
+
+void cmvs_layer_sprite_wear(cmvs_scene *s, int layer, int sprite, int state)
+{
+    cmvs_sprite *e = sprite_of(s, layer, sprite);
+    if (!e || state < 0 || state >= CMVS_SPRITE_STATES) return;
+    /* 0x004688d0 compares the state with the one already worn FIRST and
+     * returns without touching the part when they are the same. */
+    if (e->worn == state) return;
+    e->worn = state;
+    if (cmvs_scene_exists(s, CMVS_LAYER_OBJECT(layer), CMVS_LAYER_PART(sprite)))
+        cmvs_scene_source(s, CMVS_LAYER_OBJECT(layer), CMVS_LAYER_PART(sprite),
+                          e->sx[state], e->sy[state], e->sw[state], e->sh[state]);
+}
+
+int cmvs_layer_sprite_worn(const cmvs_scene *s, int layer, int sprite)
+{
+    const cmvs_sprite *e = sprite_of((cmvs_scene *) s, layer, sprite);
+    return e ? e->worn : 0;
+}
+
+void cmvs_layer_move(cmvs_scene *s, int layer, int mode, int x, int y)
+{
+    cmvs_layer *l;
+    if (!s || layer < 0 || layer >= CMVS_LAYERS) return;
+    l = &s->layer[layer];
+    if (mode == 0) { l->x = x; l->y = y; }
+    else if (mode == 1) { l->x += x; l->y += y; }
+    else { l->x = x; l->y = x; }   /* 0x00452776, the fall-through */
+    /* and the layer's object moves with it (0x0045279a -> 0x00433340 ->
+     * 0x0041bd60, which is the same item position command 0x045 writes). */
+    cmvs_scene_at(s, CMVS_LAYER_OBJECT(layer), -1, l->x, l->y);
+    cmvs_text_at(&s->text[layer], l->x, l->y);
+}
+
+void cmvs_layer_origin(const cmvs_scene *s, int layer, int *x, int *y)
+{
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (!s || layer < 0 || layer >= CMVS_LAYERS) return;
+    if (x) *x = s->layer[layer].x;
+    if (y) *y = s->layer[layer].y;
+}
+
+int cmvs_layer_hit(cmvs_scene *s, int layer, cmvs_input *in,
+                   int *hover, int *click, int *held)
+{
+    cmvs_layer *l;
+    int i, found = 0, down = 0;
+    if (hover) *hover = -1;      /* 0x00452a96, and it is -1 rather than 0 */
+    if (click) *click = 0;
+    if (held) *held = 0;
+    if (!s || !in || layer < 0 || layer >= CMVS_LAYERS) return 0;
+    l = &s->layer[layer];
+    /* A press starts by forgetting where the last one began (0x00452aba), so
+     * that only a sprite the loop below finds can claim it. */
+    if (cmvs_input_pressed(in, CMVS_FN_CONFIRM)) l->press_from = -1;
+    for (i = 0; i < CMVS_LAYER_SPRITES; i++) {
+        const cmvs_sprite *e = &l->sprite[i];
+        int left, top, right, bottom, over = 0;
+        if (!e->on) continue;
+        left = l->x + e->x;
+        top = l->y + e->y;
+        right = left + e->w;
+        bottom = top + e->h;
+        /* 0x00452b33: the four tests are inclusive on both edges. */
+        if (left > in->x || top > in->y || right < in->x || bottom < in->y) continue;
+        if (cmvs_input_pressed(in, CMVS_FN_CONFIRM)) l->press_from = i;
+        if (hover) *hover = i;
+        if (cmvs_input_released(in, CMVS_FN_CONFIRM, &over)) {
+            cmvs_input_clear(in, CMVS_FN_CONFIRM);          /* 0x00452b76 */
+            if (l->press_from == i && click) *click = 1;
+        }
+        if (over && held) *held = 1;
+        found = 1;
+    }
+    /* After the table: a release anywhere ends a press that began on a sprite,
+     * and the button coming up forgets it either way (0x00452bc3 onwards). */
+    if (cmvs_input_released(in, CMVS_FN_CONFIRM, NULL) && l->press_from >= 0) {
+        cmvs_input_clear(in, CMVS_FN_CONFIRM);
+        l->press_from = -1;
+    }
+    cmvs_input_released(in, CMVS_FN_CONFIRM, &down);
+    if (!down) l->press_from = -1;
+    return found;
+}
+
+int cmvs_layer_hit_rect(const cmvs_scene *s, int layer, const cmvs_input *in,
+                        int x, int y, int w, int h)
+{
+    int left, top;
+    if (!s || !in || layer < 0 || layer >= CMVS_LAYERS) return 0;
+    left = s->layer[layer].x + x;
+    top = s->layer[layer].y + y;
+    /* 0x00452804: the near edges are inclusive and the far ones are not, which
+     * is one pixel tighter than 0x00452a80's table above. */
+    if (left > in->x || top > in->y) return 0;
+    if (left + w <= in->x || top + h <= in->y) return 0;
+    return 1;
+}
+
 int cmvs_scene_drawn(const cmvs_scene *s) { return s ? s->drawn : 0; }
+
+/*
+ * Command 0x18d's half of the draw item (0x00467be0). The id is the layer
+ * sprite convention 0x00451d30 uses: below zero is the layer's own object and
+ * anything else is that part of it.
+ */
+void cmvs_scene_item_read(const cmvs_scene *s, int object, int part,
+                          int *x, int *y, int *depth, int *alpha,
+                          float *scale_x, float *scale_y)
+{
+    const cmvs_object *o = reach((cmvs_scene *) s, object, part);
+    if (!o) return;
+    if (x) *x = o->item.x;
+    if (y) *y = o->item.y;
+    if (depth) *depth = o->item.depth;
+    if (alpha) *alpha = o->item.alpha;
+    if (scale_x) *scale_x = o->item.world.scale_x;
+    if (scale_y) *scale_y = o->item.world.scale_y;
+}

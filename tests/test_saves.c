@@ -657,14 +657,19 @@ static void test_picture(const char *dir, const char *game)
     printf("        the frame is %d.%d%% the scene's colours after the load,"
            " and was %d.%d%% before it\n", now / 10, now % 10, was / 10, was % 10);
     /*
-     * 85.6% as this is written. The rest of the frame is the two display
-     * layers the same save restores over the sky - the toolbar along the top
-     * out of iconwindow.pb3 and the message window out of message01.pb3 - so
-     * the whole screen never reads as the background alone. The logo plate
+     * 75.6% as this is written, and it was 85.6% before the toolbar worked:
+     * the rest of the frame is the two display layers the same save restores
+     * over the sky - the message window out of message01.pb3, and the bar
+     * along the top out of iconwindow.pb3, which now draws its twelve icons
+     * as well as its plate because intproc.ps3 finally registers them. The bar
+     * is ghosted at alpha 32 while the pointer is away from it (the procedure
+     * asks 0x15f whether the pointer is in its own 1280x54 strip and gives
+     * layer 7 either 32 or 256 through 0x186), so what it costs here is a
+     * tenth of the frame rather than the top of it outright. The logo plate
      * this replaced scored 0.0%, so the gap between a restored scene and an
-     * unrestored one is the whole range and not a few points.
+     * unrestored one is still the whole range and not a few points.
      */
-    check(now >= 800, "the frame after the load is the prologue scene");
+    check(now >= 700, "the frame after the load is the prologue scene");
     check(was < 500, "and the frame before it was not (it is the boot screen)");
     check(before && memcmp(before, frame, (size_t) w * h * 4) != 0,
           "so the load changed what is on screen");

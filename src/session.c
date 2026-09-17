@@ -238,3 +238,21 @@ int cmvs_session_unimplemented(const cmvs_session *s, int *distinct)
 {
     return s ? cmvs_interp_unimplemented(s->interp, distinct) : 0;
 }
+
+int cmvs_session_sprite(const cmvs_session *s, int layer, int sprite,
+                        int *x, int *y, int *w, int *h, int *worn)
+{
+    return s ? cmvs_layer_sprite_read(cmvs_interp_scene(s->interp), layer, sprite,
+                                      x, y, w, h, worn) : 0;
+}
+
+int cmvs_session_switch(const cmvs_session *s, int which)
+{
+    return s ? cmvs_interp_switch(s->interp, which) : 0;
+}
+
+long cmvs_session_command_calls(const cmvs_session *s, int command, int *known)
+{
+    if (known) *known = 0;
+    return s ? cmvs_interp_command_calls(s->interp, command, known) : 0;
+}
