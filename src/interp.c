@@ -1769,8 +1769,11 @@ static int command_builtin(cmvs_interp *in, int command)
         return 0;
     }
     case 0x1A0:     /* 0x00468a00 -> 0x00448b20: the left button, +0x43c */
-        in->sys[0] = in->input.confirm_released ? 1 : 0;
-        in->sys[4] = in->input.confirm_held ? 1 : 0;
+        {
+            int held = 0;
+            in->sys[0] = cmvs_input_released(&in->input, CMVS_FN_CONFIRM, &held) ? 1 : 0;
+            in->sys[4] = held ? 1 : 0;
+        }
         in->command_known[command] = 1;
         return 0;
     /*
@@ -1803,18 +1806,19 @@ static int command_builtin(cmvs_interp *in, int command)
      * at +0x970 was above zero and this frame's is not.
      */
     case 0x1A1:     /* 0x00471a1b -> 0x00448b50 */
-        in->input.confirm_released = 0;
-        in->input.confirm_pressed = 0;
+        cmvs_input_clear(&in->input, CMVS_FN_CONFIRM);
         in->command_known[command] = 1;
         return 0;
     case 0x1A2:     /* 0x00468a70 -> 0x00448b60: KEY_FUNCTION_02, +0x448 */
-        in->sys[0] = in->input.cancel_released ? 1 : 0;
-        in->sys[4] = in->input.cancel_held ? 1 : 0;
+        {
+            int held = 0;
+            in->sys[0] = cmvs_input_released(&in->input, CMVS_FN_CANCEL, &held) ? 1 : 0;
+            in->sys[4] = held ? 1 : 0;
+        }
         in->command_known[command] = 1;
         return 0;
     case 0x1A3:     /* 0x00471a3a -> 0x00448b90 */
-        in->input.cancel_released = 0;
-        in->input.cancel_pressed = 0;
+        cmvs_input_clear(&in->input, CMVS_FN_CANCEL);
         in->command_known[command] = 1;
         return 0;
     /*
@@ -1928,14 +1932,13 @@ static int command_builtin(cmvs_interp *in, int command)
          * window's own buttons through the hit test at 0x00452a80.
          */
         cmvs_text *t = cmvs_scene_text(in->scene, arg(in, 3, 2));
-        int click = in->input.confirm_pressed;
+        int click = cmvs_input_pressed(&in->input, CMVS_FN_CONFIRM);
         in->message_layer = arg(in, 3, 2);
         if (click) {
             /* 0x00448B50, which is what the original calls the moment it has
              * acted on the press. Leaving the edge latched would spend one
              * click on every wait between here and the next frame. */
-            in->input.confirm_pressed = 0;
-            in->input.confirm_released = 0;
+            cmvs_input_clear(&in->input, CMVS_FN_CONFIRM);
         }
         in->command_known[command] = 1;
         if (t && cmvs_text_revealing(t)) {
@@ -3551,9 +3554,9 @@ void cmvs_interp_report(const cmvs_interp *in, void *out)
     for (i = 0; i < COMMANDS; i++) {
         if (!in->command_seen[i]) continue;
         if (shown++ == 0) fprintf(f, "commands called:\n");
-        if (shown <= 40)
+        if (shown <= 400)
             fprintf(f, "  0x%03x %6d  %s\n", i, in->command_seen[i],
                     in->command_known[i] ? "" : "not implemented");
     }
-    if (shown > 40) fprintf(f, "  ... %d command slots in all\n", shown);
+    if (shown > 400) fprintf(f, "  ... %d command slots in all\n", shown);
 }
