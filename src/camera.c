@@ -29,11 +29,70 @@ void cmvs_camera_init(cmvs_camera *c)
 }
 
 /*
+ * KIND 1, at 0x00444069: the projection a camera has before a script gives it
+ * one. It differs from kind 3 in every part, so it is its own routine.
+ *
+ * - it accepts anything IN FRONT of the camera (0x0044407a tests dz > 0),
+ *   where kind 3 throws away anything nearer than nine units;
+ * - its scale does not fall off with distance at all. It is a symmetric zoom
+ *   about the item's own plane: t = (plane - dz) / 2 (the constant at
+ *   0x005477f8 is 0.5), and the item is drawn at 1 + t in front of its plane
+ *   and at 1 / (1 + |t|) behind it (0x004440c6 and 0x004440cc). An item
+ *   standing at the depth it declares - which is every staged object
+ *   ChronoClock places - is drawn at 1, once, not squared;
+ * - the pixels one world unit covers come from the camera's REFERENCE depth
+ *   over the item's depth (0x00444115 onwards), and the principal point is
+ *   half the screen rather than command 0x059's centre;
+ * - the fade is over the last half unit before the camera itself
+ *   (0x004440ec: 0.5 at 0x005494fc, 512 at 0x00549a60), not over the unit
+ *   before a front plane.
+ *
+ * The rotation the routine also answers (camera +0x38 times 100, modulo
+ * 36000, at 0x004441c8) and the depth it writes at out+0x08 have nowhere to go
+ * in this engine's projection yet, so they are not computed.
+ */
+static int project_flat(const cmvs_camera *c, const cmvs_placement *p,
+                        cmvs_projection *out)
+{
+    float dz = p->z - c->z;
+    float t, scale, unit, across, down;
+
+    if (!(dz > 0.0f)) return 0;                     /* 0x0044407a */
+
+    t = (p->plane - dz) * 0.5f;                     /* 0x004440ae */
+    scale = t >= 0.0f ? 1.0f + t : 1.0f / (1.0f - t);
+
+    /* 0x004440ec: 255 unless the item is within half a unit of the camera. */
+    out->alpha = dz < 0.5f ? (int) (dz * 512.0f) : 255;
+    if (out->alpha < 0) out->alpha = 0;
+    if (out->alpha > 255) out->alpha = 255;
+
+    if (c->view_width == 0.0f || c->view_height == 0.0f) return 0;
+    unit = c->reference_depth / dz;                 /* 0x00444115 */
+    across = c->screen_width / c->view_width;
+    down = c->screen_height / c->view_height;
+
+    out->x = (p->x - c->x) * unit * across + c->screen_width * 0.5f;
+    out->y = ((c->y - p->y) * unit + p->lift) * down + c->screen_height * 0.5f
+             + (p->plane - dz) * c->lift;
+    out->scale_x = p->scale_x * scale;              /* 0x0044418c, once */
+    out->scale_y = p->scale_y * scale;
+    return 1;
+}
+
+/*
  * 0x00443da0, the branch its first field selects with `dec eax` three times:
  * kind 1 is at 0x00444069, kind 2 at 0x00443f65 and kind 3 - the one every
- * ChronoClock script asks for, with 0x05f (3, camera) - at 0x00443dc2. Only
- * kind 3 is written here; the other two answer 0 so the scene falls back to
- * the flat placement rather than inventing a projection.
+ * ChronoClock script asks for, with 0x05f (3, camera) - at 0x00443dc2.
+ *
+ * Kind 1 and kind 3 are both written here. Kind 1 is the camera EVERY camera
+ * is until a script says otherwise (0x004437c0 stores 1 in the first field),
+ * and it is reached in real play: a save carries the scene's objects but not
+ * the scene's cameras, so a game loaded from the title draws snky01.ps3's
+ * rooftop through camera 0 exactly as the constructor left it. Kind 2 is not
+ * written: it is a longer routine that joins kind 3's tail at 0x00443ecf, and
+ * nothing in ChronoClock reaches it - every 0x05f in the game's 84 scripts
+ * asks for 3 - so it answers 0 rather than being half-read.
  */
 int cmvs_camera_project(const cmvs_camera *c, const cmvs_placement *p,
                         cmvs_projection *out)
@@ -41,6 +100,7 @@ int cmvs_camera_project(const cmvs_camera *c, const cmvs_placement *p,
     float dz, scale, kx, ky, across, down;
 
     if (!c || !p || !out) return 0;
+    if (c->kind == 1) return project_flat(c, p, out);
     if (c->kind != 3) return 0;
 
     /*

@@ -1026,6 +1026,39 @@ static void test_projection(void)
     check(cmvs_camera_project(&c, &p, &at) != 0, "an item at its own depth projects");
     check(at.scale_x > 0.999f && at.scale_x < 1.001f,
           "and squaring the factor changes nothing there");
+
+    /*
+     * And the camera a LOAD leaves behind. A save carries the scene's objects
+     * and not its cameras, so a game loaded from the title draws snky01.ps3's
+     * rooftop through camera 0 exactly as its constructor left it - kind 1,
+     * a 1024 x 614 screen, 10 x 6 world units at a reference depth of 10 -
+     * and kind 1 is a different routine (0x00444069). With it unwritten the
+     * item fell back to the flat placement at its own anchor, (-910, -512),
+     * and the background covered 910 x 512 of the frame with black beside it:
+     * that is the 0.7115 x 0.7120 the rig measured.
+     */
+    cmvs_camera_init(&c);
+    c.x = 0.0f; c.y = 36.0f; c.z = 0.0f;        /* command 0x062, and nothing else */
+    memset(&p, 0, sizeof p);
+    p.x = 0.0f; p.y = 36.0f; p.z = 70.0f;
+    p.plane = 70.0f;
+    p.scale_x = 1.0f; p.scale_y = 1.0f;
+    check(c.kind == 1, "a camera nothing has configured is kind 1");
+    check(cmvs_camera_project(&c, &p, &at) != 0,
+          "and it projects the rooftop rather than refusing it");
+    printf("        kind 1: anchor at (%.1f, %.1f), scale %.3f", at.x, at.y, at.scale_x);
+    putchar(10);
+    check(at.scale_x > 0.999f && at.scale_x < 1.001f,
+          "an item at its own plane is drawn at 1, once, not squared");
+    left = at.x - 910.0f * at.scale_x;
+    right = left + 1820.0f * at.scale_x;
+    check(left <= 0.0f && right >= 1280.0f,
+          "and the bitmap still reaches past both edges of the frame");
+    {
+        float top = at.y - 512.0f * at.scale_y;
+        check(top <= 0.0f && top + 1024.0f * at.scale_y >= 720.0f,
+              "and past the top and the bottom of it too");
+    }
 }
 
 /*
@@ -1078,6 +1111,32 @@ static void tile_mean(const cmvs_session *s, int x, int y, int w, int h, int out
  * answers with that item, or the frames run out. The repeat is what makes the
  * walk deterministic without hard-coding how long a screen takes to build.
  */
+/* The last lit pixel along one row and down one column of the composed frame:
+ * the rig's own two measurements of where a background stops. */
+static int last_lit_in_row(const cmvs_session *s, int row)
+{
+    const uint8_t *px = cmvs_session_pixels(s);
+    int x, w = cmvs_session_width(s), last = -1;
+    if (!px || row < 0 || row >= cmvs_session_height(s)) return -1;
+    for (x = 0; x < w; x++) {
+        const uint8_t *q = px + ((size_t) row * w + x) * 4;
+        if (q[0] > 8 || q[1] > 8 || q[2] > 8) last = x;
+    }
+    return last;
+}
+
+static int last_lit_in_column(const cmvs_session *s, int column)
+{
+    const uint8_t *px = cmvs_session_pixels(s);
+    int y, w = cmvs_session_width(s), h = cmvs_session_height(s), last = -1;
+    if (!px || column < 0 || column >= w) return -1;
+    for (y = 0; y < h; y++) {
+        const uint8_t *q = px + ((size_t) y * w + column) * 4;
+        if (q[0] > 8 || q[1] > 8 || q[2] > 8) last = y;
+    }
+    return last;
+}
+
 static int press_until(cmvs_session *s, int x, int y, int item, int cap)
 {
     char err[256] = {0};
@@ -1236,6 +1295,41 @@ static void test_load_screen_at(const char *dir, const char *game, int attract,
               "and its box is a plausible height rather than thousands of pixels");
     }
     if (layout) layout_of(s, 7, layout, layoutlen);
+
+    /*
+     * THE STAGED BACKGROUND, measured on the composed frame the way the rig
+     * measured it on the screen: the last lit pixel along row 200 and down
+     * column 133. Both were at 0.711 of the frame - the picture drawn at its
+     * own anchor with black to the right of it and below it - for as long as
+     * camera kind 1 was unwritten. Reading five lines on from the load is what
+     * reaches the rooftop scene; the frame before it is the full-width sky, so
+     * the check is made only once the scene has changed.
+     */
+    {
+        int f, line, black_right = 0, black_below = 0, measured = 0;
+        for (line = 0; line < 12; line++) {
+            for (f = 0; f < 6; f++) {
+                cmvs_session_pointer(s, 640, 402);
+                if (f == 0) cmvs_session_button(s, 0, 1);
+                if (f == 3) cmvs_session_button(s, 0, 0);
+                if (cmvs_session_frame(s, err, sizeof err) <= 0) break;
+            }
+            if (line >= 5) {
+                int right = last_lit_in_row(s, 200);
+                int bottom = last_lit_in_column(s, 133);
+                measured++;
+                if (right < cmvs_session_width(s) - 1) black_right++;
+                if (bottom < cmvs_session_height(s) - 1) black_below++;
+                if (line == 5)
+                    printf("        after the load, row 200 ends at %d of %d, column 133 at %d of %d",
+                           right, cmvs_session_width(s), bottom, cmvs_session_height(s)),
+                    putchar(10);
+            }
+        }
+        check(measured > 0, "the scene reads on from a load");
+        check(black_right == 0, "the staged background reaches the right edge of the frame");
+        check(black_below == 0, "and the bottom of it");
+    }
     cmvs_session_close(s);
 }
 
