@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "broker.h"
 #include "cpz.h"
 #include "pb3.h"
 #include "script.h"
@@ -21,6 +22,15 @@ typedef struct cmvs_game cmvs_game;
 /* Reads cmvs.cfg for the pack folder and the window size, then opens every
  * archive it finds there. */
 cmvs_game *cmvs_game_open(const char *folder, char *err, size_t errlen);
+
+/*
+ * The same game, over a host file broker instead of a real folder
+ * (Enginehost docs/engine-sandbox.md): an isolated launch cannot resolve
+ * the game folder itself, so cmvs.cfg, every archive and every loose file
+ * this reads is asked of the broker by a path relative to the game's own
+ * root instead of being opened directly.
+ */
+cmvs_game *cmvs_game_open_via_broker(const cmvs_broker *broker, char *err, size_t errlen);
 void cmvs_game_close(cmvs_game *g);
 
 int cmvs_game_width(const cmvs_game *g);

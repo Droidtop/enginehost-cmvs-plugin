@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "cmv.h"
 #include "commands.h"
@@ -213,6 +214,9 @@ struct cmvs_interp {
      */
     char save_base[512];
     char save_folder[640];
+    /* Non-NULL only for an isolated launch (Enginehost docs/engine-sandbox.md);
+       mutually exclusive with save_base being set. */
+    const cmvs_broker *save_broker;
     int thumb_w, thumb_h;       /* +0x282c and +0x2830, command 0x2b0 */
     int thumb_on;               /* +0x2828 */
     cmvs_save image;
@@ -1425,7 +1429,7 @@ static const char *as_string(cmvs_interp *in, int32_t v)
  */
 static int command_builtin(cmvs_interp *in, int command);
 static int slot_path(const cmvs_interp *in, int slot, char *out, size_t n);
-static uint8_t *read_file(const char *path, int *size_out);
+static uint8_t *read_file(const cmvs_interp *in, const char *path, int *size_out);
 static void ensure_folder(const char *path);
 static int load_slot(cmvs_interp *in, int slot, const char *name, char *err, size_t errlen);
 static int enter_script(cmvs_interp *in, const char *name, char *err, size_t errlen);
@@ -3039,12 +3043,19 @@ static int command_builtin(cmvs_interp *in, int command)
         char folder[640];
         size_t at;
         in->command_known[command] = 1;
-        if (!name || !in->save_base[0]) {
-            if (!in->save_base[0])
+        if (!name || (!in->save_base[0] && !in->save_broker)) {
+            if (!in->save_base[0] && !in->save_broker)
                 fprintf(stderr, "cmvs: no save folder: the host gave the engine none\n");
             return 0;
         }
-        snprintf(folder, sizeof folder, "%s/%s", in->save_base, name);
+        /*
+         * A broker's save root is already scoped to this game (Enginehost
+         * docs/engine-sandbox.md), so the folder command 0x016 names becomes
+         * a path relative to it rather than one appended to a real base
+         * directory - the same shape either way, just anchored differently.
+         */
+        snprintf(folder, sizeof folder, "%s%s%s", in->save_broker ? "" : in->save_base,
+                 in->save_broker ? "" : "/", name);
         /* The script writes a Windows path separator; one separator here. */
         for (at = 0; folder[at]; at++) if (folder[at] == '\\') folder[at] = '/';
         while (at > 1 && folder[at - 1] == '/') folder[--at] = 0;
@@ -3052,7 +3063,7 @@ static int command_builtin(cmvs_interp *in, int command)
         /* Made now, not at the first write: a folder that is named but not
          * there reads as "saves are kept in ..." in the log and then fails
          * silently the first time a reader saves. */
-        ensure_folder(in->save_folder);
+        if (!in->save_broker) ensure_folder(in->save_folder);
         fprintf(stderr, "cmvs: saves are kept in %s\n", in->save_folder);
         /* The settings the player left behind belong to the folder, so they
          * are read the moment the folder is known. */
@@ -3183,7 +3194,7 @@ static int command_builtin(cmvs_interp *in, int command)
         in->sys[0] = 0;
         if (slot < 0 || object < 0 || object >= 0x100) return 0;
         if (!slot_path(in, (int) slot, path, sizeof path)) return 0;
-        file = read_file(path, &size);
+        file = read_file(in, path, &size);
         if (!file) return 0;
         if (!cmvs_save_peek(file, size, &peek, why, sizeof why)) {
             free(file);
@@ -3236,7 +3247,7 @@ static int command_builtin(cmvs_interp *in, int command)
             int size = 0;
             uint32_t when;
             if (!slot_path(in, i, path, sizeof path)) break;
-            file = read_file(path, &size);
+            file = read_file(in, path, &size);
             if (!file) continue;
             if (!cmvs_save_peek(file, size, &peek, why, sizeof why)) { free(file); continue; }
             free(file);
@@ -3639,6 +3650,7 @@ static void ensure_folder(const char *path)
 void cmvs_interp_save_base(cmvs_interp *in, const char *dir)
 {
     if (!in) return;
+    in->save_broker = NULL;
     snprintf(in->save_base, sizeof in->save_base, "%s", dir ? dir : "");
     /*
      * With no folder from the host the engine has NO save folder. It does not
@@ -3646,6 +3658,14 @@ void cmvs_interp_save_base(cmvs_interp *in, const char *dir)
      * nothing of ours is written into it, on any platform.
      */
     if (!in->save_base[0]) in->save_folder[0] = 0;
+}
+
+void cmvs_interp_save_broker(cmvs_interp *in, const cmvs_broker *broker)
+{
+    if (!in) return;
+    in->save_broker = broker;
+    in->save_base[0] = 0;
+    if (!in->save_broker) in->save_folder[0] = 0;
 }
 
 const char *cmvs_interp_save_folder(const cmvs_interp *in)
@@ -3667,13 +3687,21 @@ static int system_path(const cmvs_interp *in, const char *name, char *out, size_
     return 1;
 }
 
-static uint8_t *read_file(const char *path, int *size_out)
+static uint8_t *read_file(const cmvs_interp *in, const char *path, int *size_out)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f;
     uint8_t *buf;
     long size;
 
-    if (!f) return NULL;
+    if (in->save_broker) {
+        int fd = in->save_broker->open_read(in->save_broker->ctx, path);
+        if (fd < 0) return NULL;
+        f = fdopen(fd, "rb");
+        if (!f) { close(fd); return NULL; }
+    } else {
+        f = fopen(path, "rb");
+        if (!f) return NULL;
+    }
     fseek(f, 0, SEEK_END);
     size = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -3686,10 +3714,22 @@ static uint8_t *read_file(const char *path, int *size_out)
     return buf;
 }
 
-static int write_file(const char *path, const uint8_t *data, int size)
+static int write_file(const cmvs_interp *in, const char *path, const uint8_t *data, int size)
 {
-    FILE *f = fopen(path, "wb");
+    FILE *f;
     int ok;
+
+    if (in->save_broker) {
+        int fd = in->save_broker->open_write(in->save_broker->ctx, path);
+        if (fd < 0) return 0;
+        f = fdopen(fd, "wb");
+        if (!f) { close(fd); return 0; }
+        ok = fwrite(data, 1, (size_t) size, f) == (size_t) size;
+        fclose(f);
+        if (ok) ok = in->save_broker->commit_write(in->save_broker->ctx, path) == 0;
+        return ok;
+    }
+    f = fopen(path, "wb");
     if (!f) return 0;
     ok = fwrite(data, 1, (size_t) size, f) == (size_t) size;
     fclose(f);
@@ -4150,8 +4190,8 @@ int cmvs_interp_save_slot(cmvs_interp *in, int slot, char *err, size_t errlen)
     file = cmvs_save_write(&save, &size, err, errlen);
     cmvs_save_free(&save);
     if (!file) return 0;
-    ensure_folder(in->save_folder);
-    ok = write_file(path, file, size);
+    if (!in->save_broker) ensure_folder(in->save_folder);
+    ok = write_file(in, path, file, size);
     free(file);
     if (!ok) { if (err && errlen) snprintf(err, errlen, "%s could not be written", path); return 0; }
     fprintf(stderr, "cmvs: saved slot %d to %s (%d bytes)\n", slot, path, size);
@@ -4169,7 +4209,7 @@ int cmvs_interp_load_slot(cmvs_interp *in, int slot, char *err, size_t errlen)
         fail(err, errlen, "there is no save folder: the host gave the engine none");
         return 0;
     }
-    file = read_file(path, &size);
+    file = read_file(in, path, &size);
     if (!file) { if (err && errlen) snprintf(err, errlen, "%s is not there", path); return 0; }
     ok = cmvs_save_read(file, size, &save, err, errlen);
     free(file);
@@ -4184,6 +4224,7 @@ int cmvs_interp_delete_slot(cmvs_interp *in, int slot)
 {
     char path[1024];
     if (!slot_path(in, slot, path, sizeof path)) return 0;
+    if (in->save_broker) return in->save_broker->remove(in->save_broker->ctx, path) == 0;
     return remove(path) == 0;
 }
 
@@ -4202,14 +4243,14 @@ int cmvs_interp_save_system(cmvs_interp *in, char *err, size_t errlen)
     file = cmvs_system_write(&sys, &size, err, errlen);
     cmvs_system_free(&sys);
     if (!file) return 0;
-    ensure_folder(in->save_folder);
+    if (!in->save_broker) ensure_folder(in->save_folder);
     /* The original copies the old file aside before every rewrite (0x00414f50),
      * so a write interrupted here still leaves the player their settings. */
     if (system_path(in, "system.bak", backup, sizeof backup)) {
-        previous = read_file(path, &previous_size);
-        if (previous) { write_file(backup, previous, previous_size); free(previous); }
+        previous = read_file(in, path, &previous_size);
+        if (previous) { write_file(in, backup, previous, previous_size); free(previous); }
     }
-    ok = write_file(path, file, size);
+    ok = write_file(in, path, file, size);
     free(file);
     if (!ok) { if (err && errlen) snprintf(err, errlen, "%s could not be written", path); return 0; }
     return 1;
@@ -4223,7 +4264,7 @@ int cmvs_interp_load_system(cmvs_interp *in, char *err, size_t errlen)
     int size = 0, ok;
 
     if (!system_path(in, "system.dat", path, sizeof path)) return 0;
-    file = read_file(path, &size);
+    file = read_file(in, path, &size);
     if (!file) return 0;
     ok = cmvs_system_read(file, size, &sys, err, errlen);
     free(file);

@@ -91,6 +91,45 @@ cmvs_session *cmvs_session_open(const char *folder, const char *script,
     return s;
 }
 
+/*
+ * Sandbox layer 2 (Enginehost docs/engine-sandbox.md), the same open with
+ * the game folder and save folder each a host-brokered cmvs_broker instead
+ * of a real path - this process, under android:isolatedProcess, cannot
+ * resolve either path itself. save_broker may be NULL, the same as
+ * `saves` being NULL for cmvs_session_open: the game then has no save
+ * folder at all.
+ */
+cmvs_session *cmvs_session_open_via_broker(const cmvs_broker *game_broker, const char *script,
+                                           const char *font, const cmvs_broker *save_broker,
+                                           char *err, size_t errlen)
+{
+    cmvs_session *s = calloc(1, sizeof *s);
+    if (!s) {
+        if (err && errlen) snprintf(err, errlen, "out of memory");
+        return NULL;
+    }
+    s->budget = 2000000;
+    s->game = cmvs_game_open_via_broker(game_broker, err, errlen);
+    if (!s->game) { free(s); return NULL; }
+    s->interp = cmvs_interp_new(s->game);
+    if (!s->interp) {
+        if (err && errlen) snprintf(err, errlen, "the interpreter could not be created");
+        cmvs_game_close(s->game);
+        free(s);
+        return NULL;
+    }
+    if (save_broker) cmvs_interp_save_broker(s->interp, save_broker);
+    if (!cmvs_interp_boot(s->interp,
+                          script && *script ? script : cmvs_game_boot_script(s->game),
+                          err, errlen)) {
+        cmvs_session_close(s);
+        return NULL;
+    }
+    open_font(s, font);
+    s->alive = 1;
+    return s;
+}
+
 void cmvs_session_close(cmvs_session *s)
 {
     if (!s) return;

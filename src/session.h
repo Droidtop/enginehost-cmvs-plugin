@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "broker.h"
 #include "text.h"
 
 typedef struct cmvs_session cmvs_session;
@@ -31,6 +32,19 @@ typedef struct cmvs_session cmvs_session;
 cmvs_session *cmvs_session_open(const char *folder, const char *script,
                                 const char *font, const char *saves,
                                 char *err, size_t errlen);
+
+/*
+ * The same game, over host file brokers instead of real folders (Enginehost
+ * docs/engine-sandbox.md "Host file service design"): an isolated launch
+ * cannot resolve the game folder or a save folder itself, so every open this
+ * engine makes for either one crosses back into Java through the broker
+ * that owns it. save_broker may be NULL - the game then has no save folder
+ * at all, exactly as passing NULL for `saves` above means none for an
+ * in-process launch.
+ */
+cmvs_session *cmvs_session_open_via_broker(const cmvs_broker *game_broker, const char *script,
+                                           const char *font, const cmvs_broker *save_broker,
+                                           char *err, size_t errlen);
 void cmvs_session_close(cmvs_session *s);
 
 int cmvs_session_width(const cmvs_session *s);

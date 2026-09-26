@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "md5.h"
 
@@ -403,9 +404,11 @@ reject:
     return 0;
 }
 
-cpz_archive *cpz_open(const char *path, char *err, size_t errlen)
+/* The shared body of cpz_open and cpz_open_fd: everything past having a
+   FILE* on the archive, whether that came from a real path or a
+   host-brokered descriptor. Takes ownership of fp either way. */
+static cpz_archive *cpz_open_stream(FILE *fp, char *err, size_t errlen)
 {
-    FILE *fp;
     long long length;
     uint8_t raw[0x40];
     cpz_header base;
@@ -413,8 +416,6 @@ cpz_archive *cpz_open(const char *path, char *err, size_t errlen)
     uint8_t digest[16];
     int i;
 
-    fp = fopen(path, "rb");
-    if (!fp) { fail(err, errlen, "Cannot open the archive"); return NULL; }
     if (fseek(fp, 0, SEEK_END) != 0) { fail(err, errlen, "Cannot size the archive"); goto bad; }
     length = ftell(fp);
     if (length < 0x40) { fail(err, errlen, "File is too small to be a CPZ archive"); goto bad; }
@@ -468,6 +469,22 @@ bad:
     free(work);
     fclose(fp);
     return NULL;
+}
+
+cpz_archive *cpz_open(const char *path, char *err, size_t errlen)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) { fail(err, errlen, "Cannot open the archive"); return NULL; }
+    return cpz_open_stream(fp, err, errlen);
+}
+
+cpz_archive *cpz_open_fd(int fd, char *err, size_t errlen)
+{
+    FILE *fp;
+    if (fd < 0) { fail(err, errlen, "Cannot open the archive"); return NULL; }
+    fp = fdopen(fd, "rb");
+    if (!fp) { fail(err, errlen, "Cannot open the archive"); close(fd); return NULL; }
+    return cpz_open_stream(fp, err, errlen);
 }
 
 void cpz_close(cpz_archive *a)

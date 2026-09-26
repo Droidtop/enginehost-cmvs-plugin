@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include "audio.h"
+#include "broker.h"
 #include "game.h"
 #include "input.h"
 #include "save.h"
@@ -95,6 +96,15 @@ int cmvs_interp_menu_events(const cmvs_interp *in, int *last_item);
  * - it never writes into the game folder.
  */
 void cmvs_interp_save_base(cmvs_interp *in, const char *dir);
+/*
+ * The same, over a host file broker instead of a real folder (Enginehost
+ * docs/engine-sandbox.md): an isolated launch cannot resolve or create the
+ * save folder itself, so every slot, system.dat/.bak read or write below
+ * asks the broker for a path relative to the save root command 0x016
+ * names, instead of opening or removing a real file. Mutually exclusive
+ * with cmvs_interp_save_base; the one called last wins.
+ */
+void cmvs_interp_save_broker(cmvs_interp *in, const cmvs_broker *broker);
 const char *cmvs_interp_save_folder(const cmvs_interp *in);
 
 int cmvs_interp_save_slot(cmvs_interp *in, int slot, char *err, size_t errlen);

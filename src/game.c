@@ -2,11 +2,12 @@
 
 #include <ctype.h>
 #include <dirent.h>
-#include <sys/stat.h>
-#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /*
  * How many archives a game may have. Which archives it HAS is read off the
@@ -26,7 +27,8 @@
 
 struct cmvs_game {
     char folder[512];
-    char pack[1024];            /* absolute, with a trailing slash */
+    char pack[1024];            /* absolute, with a trailing slash; real folder only */
+    char pack_rel[1024];        /* relative to the game root, with a trailing slash */
     int width, height;
     char font[128];             /* the first FONT= family, cp932 as written */
     cpz_archive *archive[ARCHIVE_MAX];
@@ -34,11 +36,23 @@ struct cmvs_game {
     int archives;
     int script_archive;         /* index of the archive that holds scripts */
 
+    /*
+     * A host file broker in place of a real folder (Enginehost
+     * docs/engine-sandbox.md "Host file service design"), or NULL for an
+     * ordinary in-process launch. Every open below asks this instead of
+     * fopen()/opendir() when it is set; nothing about the LOOKUPS changes,
+     * only how a name becomes a descriptor.
+     */
+    const cmvs_broker *broker;
+
     /* Every loose file under the game folder, indexed on the first sound the
      * scripts ask for and kept for the rest of the session. The two strings
      * are on the heap because a game's own folder names decide how long a path
      * is, and a fixed row wide enough for the deepest of them would be mostly
-     * air in every other one. */
+     * air in every other one. loose_path is always RELATIVE to the game
+     * folder root, whether it came from a real recursive walk or from the
+     * broker's own listing, so read_loose() has one way to open it either
+     * way. */
     int loose_indexed;
     int loose;
     char *loose_name[LOOSE_MAX];
@@ -66,28 +80,47 @@ static void fail(char *err, size_t errlen, const char *msg)
     if (err && errlen) { strncpy(err, msg, errlen - 1); err[errlen - 1] = 0; }
 }
 
+/* A file relative to the game folder's own root - "cmvs.cfg", or a loose
+ * entry found under it - opened for reading either from the real folder or
+ * through the broker, whichever this game was opened with. This is the one
+ * place that decides which of the two a relative name means. */
+static FILE *game_open_read(cmvs_game *g, const char *relpath)
+{
+    if (g->broker) {
+        int fd = g->broker->open_read(g->broker->ctx, relpath);
+        if (fd < 0) return NULL;
+        return fdopen(fd, "rb");
+    }
+    {
+        char path[2600];
+        snprintf(path, sizeof path, "%s/%s", g->folder, relpath);
+        return fopen(path, "rb");
+    }
+}
+
 /* cmvs.cfg is a Windows INI in cp932 with backslash paths. Only two keys
  * matter here, and both live in it verbatim. */
 static void read_config(cmvs_game *g)
 {
-    char path[2400], line[512];
+    char line[512];
     FILE *f;
 
     g->width = 1280;
     g->height = 720;
-    snprintf(g->pack, sizeof g->pack, "%.500s/data/pack/", g->folder);
+    snprintf(g->pack_rel, sizeof g->pack_rel, "data/pack/");
+    if (!g->broker) snprintf(g->pack, sizeof g->pack, "%.500s/data/pack/", g->folder);
 
-    snprintf(path, sizeof path, "%s/cmvs.cfg", g->folder);
-    f = fopen(path, "rb");
+    f = game_open_read(g, "cmvs.cfg");
     if (!f) return;
     while (fgets(line, sizeof line, f)) {
         char *nl = strpbrk(line, "\r\n");
         if (nl) *nl = 0;
         if (!strncmp(line, "SCRIPT_INIT_PATH=", 17)) {
             char *p;
-            snprintf(g->pack, sizeof g->pack, "%.500s/%.400s", g->folder, line + 17);
-            for (p = g->pack; *p; p++) if (*p == 0x5C) *p = '/';
-            if (p > g->pack && p[-1] != '/') { *p++ = '/'; *p = 0; }
+            snprintf(g->pack_rel, sizeof g->pack_rel, "%.400s", line + 17);
+            for (p = g->pack_rel; *p; p++) if (*p == 0x5C) *p = '/';
+            if (p > g->pack_rel && p[-1] != '/') { *p++ = '/'; *p = 0; }
+            if (!g->broker) snprintf(g->pack, sizeof g->pack, "%.500s/%s", g->folder, g->pack_rel);
         } else if (!strncmp(line, "FONT=", 5)) {
             if (!g->font[0]) snprintf(g->font, sizeof g->font, "%.120s", line + 5);
         } else if (!strncmp(line, "WINDOW_WIDTH=", 13)) {
@@ -114,38 +147,72 @@ static int name_order(const void *a, const void *b)
  */
 static void collect_archives(cmvs_game *g)
 {
-    DIR *d = opendir(g->pack);
     struct dirent *e;
 
-    if (!d) return;
-    while ((e = readdir(d)) && g->archives < ARCHIVE_MAX) {
-        size_t len = strlen(e->d_name);
-        if (len < 5 || len >= sizeof g->archive_name[0]) continue;
-        if (strcasecmp(e->d_name + len - 4, ".cpz")) continue;
-        snprintf(g->archive_name[g->archives], sizeof g->archive_name[0],
-                 "%s", e->d_name);
-        g->archives++;
+    if (g->broker) {
+        char names[CMVS_BROKER_LIST_MAX][256];
+        char listed[1024];
+        int total, i;
+        snprintf(listed, sizeof listed, "%s", g->pack_rel);
+        /* The broker's own list() takes a plain relative path, without the
+           trailing slash a real opendir() would not need either. */
+        {
+            size_t n = strlen(listed);
+            while (n > 0 && listed[n - 1] == '/') listed[--n] = 0;
+        }
+        total = g->broker->list(g->broker->ctx, listed, names, CMVS_BROKER_LIST_MAX);
+        for (i = 0; i < total && g->archives < ARCHIVE_MAX; i++) {
+            size_t len = strlen(names[i]);
+            if (len < 5 || len >= sizeof g->archive_name[0]) continue;
+            if (strcasecmp(names[i] + len - 4, ".cpz")) continue;
+            snprintf(g->archive_name[g->archives], sizeof g->archive_name[0], "%s", names[i]);
+            g->archives++;
+        }
+    } else {
+        DIR *d = opendir(g->pack);
+        if (!d) return;
+        while ((e = readdir(d)) && g->archives < ARCHIVE_MAX) {
+            size_t len = strlen(e->d_name);
+            if (len < 5 || len >= sizeof g->archive_name[0]) continue;
+            if (strcasecmp(e->d_name + len - 4, ".cpz")) continue;
+            snprintf(g->archive_name[g->archives], sizeof g->archive_name[0],
+                     "%s", e->d_name);
+            g->archives++;
+        }
+        closedir(d);
     }
-    closedir(d);
     qsort(g->archive_name, (size_t) g->archives, sizeof g->archive_name[0],
           name_order);
 }
 
-cmvs_game *cmvs_game_open(const char *folder, char *err, size_t errlen)
+/* Opens one archive already named in g->archive_name, from the real pack
+ * folder or through the broker, whichever this game has. */
+static cpz_archive *open_archive(cmvs_game *g, const char *name, char *why, size_t whylen)
 {
-    cmvs_game *g = calloc(1, sizeof *g);
+    if (g->broker) {
+        char relpath[2600];
+        int fd;
+        snprintf(relpath, sizeof relpath, "%s%s", g->pack_rel, name);
+        fd = g->broker->open_read(g->broker->ctx, relpath);
+        return cpz_open_fd(fd, why, whylen);
+    }
+    {
+        char path[2600];
+        snprintf(path, sizeof path, "%s%s", g->pack, name);
+        return cpz_open(path, why, whylen);
+    }
+}
+
+static cmvs_game *open_common(cmvs_game *g, char *err, size_t errlen)
+{
     int i, opened = 0;
 
-    if (!g) { fail(err, errlen, "out of memory"); return NULL; }
-    snprintf(g->folder, sizeof g->folder, "%s", folder);
     g->script_archive = -1;
     read_config(g);
-
     collect_archives(g);
     for (i = 0; i < g->archives; i++) {
-        char path[2600], why[256];
-        snprintf(path, sizeof path, "%s%s", g->pack, g->archive_name[i]);
-        g->archive[i] = cpz_open(path, why, sizeof why);
+        char why[256];
+        g->archive[i] = open_archive(g, g->archive_name[i], why, sizeof why);
         if (!g->archive[i]) continue;
         opened++;
         /* The scripts are wherever a PS2A container is filed, and every CMVS
@@ -163,6 +230,24 @@ cmvs_game *cmvs_game_open(const char *folder, char *err, size_t errlen)
     return g;
 }
 
+cmvs_game *cmvs_game_open(const char *folder, char *err, size_t errlen)
+{
+    cmvs_game *g = calloc(1, sizeof *g);
+    if (!g) { fail(err, errlen, "out of memory"); return NULL; }
+    snprintf(g->folder, sizeof g->folder, "%s", folder);
+    return open_common(g, err, errlen);
+}
+
+cmvs_game *cmvs_game_open_via_broker(const cmvs_broker *broker, char *err, size_t errlen)
+{
+    cmvs_game *g;
+    if (!broker) { fail(err, errlen, "no host file broker for the game folder"); return NULL; }
+    g = calloc(1, sizeof *g);
+    if (!g) { fail(err, errlen, "out of memory"); return NULL; }
+    g->broker = broker;
+    return open_common(g, err, errlen);
+}
+
 void cmvs_game_close(cmvs_game *g)
 {
     int i;
@@ -175,9 +260,21 @@ void cmvs_game_close(cmvs_game *g)
 int cmvs_game_width(const cmvs_game *g) { return g->width; }
 int cmvs_game_height(const cmvs_game *g) { return g->height; }
 
-static uint8_t *read_loose(const char *path, int *size_out)
+/* strdup is not in C11 and this tree builds as -std=c11 on both machines. */
+static char *dup_string(const char *s)
 {
-    FILE *f = fopen(path, "rb");
+    size_t n = strlen(s) + 1;
+    char *copy = malloc(n);
+    if (copy) memcpy(copy, s, n);
+    return copy;
+}
+
+/* `relpath` is relative to the game folder root either way, so this is the
+ * one reader index_loose's table and cmvs_game_script's loose lookup both
+ * call. */
+static uint8_t *read_loose(cmvs_game *g, const char *relpath, int *size_out)
+{
+    FILE *f = game_open_read(g, relpath);
     long size;
     uint8_t *data;
 
@@ -201,12 +298,12 @@ static uint8_t *read_loose(const char *path, int *size_out)
 int cmvs_game_script(cmvs_game *g, const char *name, cmvs_script *out,
                      char *err, size_t errlen)
 {
-    char path[2600];
+    char relpath[2600], path[2600];
     uint8_t *raw, *data;
     int size = 0, expanded = 0;
 
-    snprintf(path, sizeof path, "%s%s", g->pack, name);
-    raw = read_loose(path, &size);
+    snprintf(relpath, sizeof relpath, "%s%s", g->pack_rel, name);
+    raw = read_loose(g, relpath, &size);
     if (raw) {
         data = cmvs_unpack_ps2(raw, size, &expanded, err, errlen);
         free(raw);
@@ -296,28 +393,16 @@ static int decode_here(cpz_archive *a, const cpz_entry *e, pb3_image *img,
     return ok;
 }
 
-/*
- * A named sound, wherever the game keeps it.
- *
- * A script asks for "bgm37.ogg" or "sys101.ogg" and nothing in the name says
- * where it is: ChronoClock keeps its music loose in data/music beside the pack
- * folder, its effects under wave/ inside se.cpz and its voices inside
- * voice2.cpz, and the engine binary names none of those. So the name is
- * searched for the same way an image name is - archive by archive, then by
- * leaf - and the loose half of the search walks the game folder once and
- * remembers what it found, because a folder full of music is read every time a
- * scene changes otherwise.
- *
- * The loose index deliberately holds every file it meets rather than a chosen
- * set of extensions: which extensions a CMVS game ships is the game's business.
- */
-/* strdup is not in C11 and this tree builds as -std=c11 on both machines. */
-static char *dup_string(const char *s)
+static void loose_add(cmvs_game *g, const char *leaf, const char *relpath)
 {
-    size_t n = strlen(s) + 1;
-    char *copy = malloc(n);
-    if (copy) memcpy(copy, s, n);
-    return copy;
+    char *name, *full;
+    if (g->loose >= LOOSE_MAX) return;
+    name = dup_string(leaf);
+    full = dup_string(relpath);
+    if (!name || !full) { free(name); free(full); return; }
+    g->loose_name[g->loose] = name;
+    g->loose_path[g->loose] = full;
+    g->loose++;
 }
 
 static void index_folder(cmvs_game *g, const char *path, int depth)
@@ -336,23 +421,50 @@ static void index_folder(cmvs_game *g, const char *path, int depth)
         if (stat(child, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
             index_folder(g, child, depth + 1);
-        } else if (g->loose < LOOSE_MAX) {
-            char *name = dup_string(e->d_name);
-            char *full = dup_string(child);
-            if (!name || !full) { free(name); free(full); continue; }
-            g->loose_name[g->loose] = name;
-            g->loose_path[g->loose] = full;
-            g->loose++;
+        } else {
+            /* Relative to the game folder root, the same as the broker walk
+             * below stores, so read_loose() never needs to know which of the
+             * two found this entry. */
+            loose_add(g, e->d_name, child + strlen(g->folder) + 1);
         }
     }
     closedir(d);
+}
+
+/*
+ * The same walk over the broker's own listing. A directory's list() answers
+ * with its children; a plain file's answers empty, the same as an empty
+ * directory would - so an empty real directory is indexed here as if it were
+ * a (never matched, never opened) loose file, which costs nothing and reads
+ * nothing, rather than needing the broker to say which of the two a name is.
+ */
+static void index_folder_broker(cmvs_game *g, const char *relpath, int depth)
+{
+    char names[CMVS_BROKER_LIST_MAX][256];
+    int total, i;
+
+    if (depth > 3) return;
+    total = g->broker->list(g->broker->ctx, relpath, names, CMVS_BROKER_LIST_MAX);
+    if (total <= 0) return;
+    for (i = 0; i < total; i++) {
+        char child[1600];
+        char sub[CMVS_BROKER_LIST_MAX][256];
+        if (relpath[0]) snprintf(child, sizeof child, "%s/%s", relpath, names[i]);
+        else snprintf(child, sizeof child, "%s", names[i]);
+        if (g->broker->list(g->broker->ctx, child, sub, CMVS_BROKER_LIST_MAX) > 0) {
+            index_folder_broker(g, child, depth + 1);
+        } else {
+            loose_add(g, names[i], child);
+        }
+    }
 }
 
 static void index_loose(cmvs_game *g)
 {
     if (g->loose_indexed) return;
     g->loose_indexed = 1;
-    index_folder(g, g->folder, 0);
+    if (g->broker) index_folder_broker(g, "", 0);
+    else index_folder(g, g->folder, 0);
 }
 
 uint8_t *cmvs_game_data(cmvs_game *g, const char *name, int *size_out,
@@ -366,7 +478,7 @@ uint8_t *cmvs_game_data(cmvs_game *g, const char *name, int *size_out,
     index_loose(g);
     for (i = 0; i < g->loose; i++) {
         if (strcasecmp(g->loose_name[i], name)) continue;
-        uint8_t *data = read_loose(g->loose_path[i], size_out);
+        uint8_t *data = read_loose(g, g->loose_path[i], size_out);
         if (data) return data;
     }
 
@@ -419,3 +531,4 @@ int cmvs_game_image(cmvs_game *g, const char *name, pb3_image *out,
     fail(err, errlen, why);
     return 0;
 }
+</content>

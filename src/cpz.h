@@ -34,6 +34,15 @@ typedef struct cpz_archive cpz_archive;
  * Returns NULL and fills err (if given) with a sentence saying why.
  */
 cpz_archive *cpz_open(const char *path, char *err, size_t errlen);
+
+/*
+ * Same archive, over a descriptor already open for reading rather than a
+ * path (Enginehost docs/engine-sandbox.md): an isolated launch cannot
+ * resolve a game-folder path itself, so its archives arrive this way,
+ * already opened by the host's own file broker. Consumes fd either way -
+ * on success as the archive's own handle, on failure by closing it.
+ */
+cpz_archive *cpz_open_fd(int fd, char *err, size_t errlen);
 void cpz_close(cpz_archive *a);
 
 const char *cpz_scheme_name(const cpz_archive *a);
