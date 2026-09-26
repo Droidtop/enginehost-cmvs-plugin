@@ -5,6 +5,7 @@
   "apiVersion": 1,
   "entrypoint": "dev.enginehost.plugin.cmvs.CmvsPlugin",
   "origin": "https://github.com/droidtop/enginehost-cmvs-plugin",
+  "isolatable": true,
   "dexFiles": [
     "classes.dex"
   ],
