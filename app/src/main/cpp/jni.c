@@ -437,11 +437,13 @@ static jlong finish_open(JNIEnv *env, session *state, int isolated, int audio_fd
 
 JNIEXPORT jlong JNICALL
 Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeOpen(JNIEnv *env, jclass klass,
-                                                      jstring folder, jstring script)
+                                                      jstring folder, jstring script,
+                                                      jstring save_folder)
 {
     (void) klass;
     const char *folder_text = folder == NULL ? NULL : (*env)->GetStringUTFChars(env, folder, NULL);
     const char *script_text = script == NULL ? NULL : (*env)->GetStringUTFChars(env, script, NULL);
+    const char *save_text = save_folder == NULL ? NULL : (*env)->GetStringUTFChars(env, save_folder, NULL);
     jlong handle = 0;
 
     last_error[0] = 0;
@@ -450,7 +452,7 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeOpen(JNIEnv *env, jclass klass,
         snprintf(last_error, sizeof last_error, "out of memory");
     } else {
         state->audio_ring_fd = -1; /* calloc leaves 0, which is a real fd (stdin) */
-        state->session = cmvs_session_open(folder_text, script_text, NULL, NULL,
+        state->session = cmvs_session_open(folder_text, script_text, NULL, save_text,
                                            last_error, sizeof last_error);
         if (state->session == NULL) {
             __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", last_error);
@@ -461,6 +463,7 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeOpen(JNIEnv *env, jclass klass,
     }
     if (folder_text != NULL) (*env)->ReleaseStringUTFChars(env, folder, folder_text);
     if (script_text != NULL) (*env)->ReleaseStringUTFChars(env, script, script_text);
+    if (save_text != NULL) (*env)->ReleaseStringUTFChars(env, save_folder, save_text);
     return handle;
 }
 
@@ -685,7 +688,7 @@ Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeTouch(JNIEnv *env, jclass klass
 JNIEXPORT void JNICALL
 enginehost_register_natives(JNIEnv *env, jclass clazz) {
     static const JNINativeMethod methods[] = {
-        {"nativeOpen", "(Ljava/lang/String;Ljava/lang/String;)J",
+        {"nativeOpen", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)J",
          (void *) Java_dev_enginehost_plugin_cmvs_CmvsPlugin_nativeOpen},
         {"nativeOpenIsolated",
          "(Ldev/enginehost/api/EngineFileBroker;Ljava/lang/String;Ldev/enginehost/api/EngineFileBroker;"
