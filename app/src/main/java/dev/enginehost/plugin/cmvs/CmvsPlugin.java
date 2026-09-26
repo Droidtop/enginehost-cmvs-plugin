@@ -267,4 +267,3 @@ public final class CmvsPlugin implements EnginePlugin, EngineStepDriven {
     /** A tap: the pointer's own left button, pressed and released together. */
     private static native void nativeTouch(long engine, int x, int y);
 }
-</content>
