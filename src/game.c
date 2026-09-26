@@ -531,4 +531,3 @@ int cmvs_game_image(cmvs_game *g, const char *name, pb3_image *out,
     fail(err, errlen, why);
     return 0;
 }
-</content>

@@ -704,4 +704,3 @@ enginehost_register_natives(JNIEnv *env, jclass clazz) {
     };
     (*env)->RegisterNatives(env, clazz, methods, (jint) (sizeof(methods) / sizeof(methods[0])));
 }
-</content>
