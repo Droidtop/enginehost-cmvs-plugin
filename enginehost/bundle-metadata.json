@@ -1,7 +1,7 @@
 {
   "bundleId": "dev.enginehost.cmvs.ps2-ps3.v1",
   "engine": "cmvs",
-  "pluginVersion": "0.1",
+  "pluginVersion": "1.0.0",
   "apiVersion": 1,
   "entrypoint": "dev.enginehost.plugin.cmvs.CmvsPlugin",
   "origin": "https://github.com/droidtop/enginehost-cmvs-plugin",
