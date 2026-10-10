@@ -7,13 +7,18 @@
 # container with no display checks a frame. jni.c beside this file takes their
 # place: it steps a session and hands Java the pixels the engine composed.
 #
-# What is left needs no library at all beyond the C runtime: the archive and
-# image codecs are the engine's own.
+# What is left needs the C runtime and AAudio, which is the device jni.c opens
+# for the engine's mixer to play into; the archive, image and Ogg codecs are the
+# engine's own, and the two vendored files in
+# third_party/ compile inside the src file that uses them - stb_truetype.h
+# inside src/font.c and stb_vorbis.c inside src/audio.c - so this glob never has
+# to name a vendored file.
 
 cmake_minimum_required(VERSION 3.22)
 project(cmvs C)
 
 set(ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../src)
+set(VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party)
 
 file(GLOB ENGINE_SOURCES CONFIGURE_DEPENDS ${ENGINE_DIR}/*.c)
 list(REMOVE_ITEM ENGINE_SOURCES ${ENGINE_DIR}/main.c ${ENGINE_DIR}/png.c)
@@ -24,6 +29,6 @@ if(NOT ENGINE_SOURCES)
 endif()
 
 add_library(cmvs SHARED ${ENGINE_SOURCES} jni.c)
-target_include_directories(cmvs PRIVATE ${ENGINE_DIR})
+target_include_directories(cmvs PRIVATE ${ENGINE_DIR} ${VENDOR_DIR})
 target_compile_options(cmvs PRIVATE -std=c11 -Wall -Wextra -Wno-unused-parameter -O2)
 target_link_libraries(cmvs PRIVATE log m aaudio)
