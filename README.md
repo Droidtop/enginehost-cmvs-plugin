@@ -15,6 +15,10 @@ a way to play a game.
 
 The format work is based on the MIT-licensed
 [`xmoezzz/CMVS-Engine`](https://github.com/xmoezzz/CMVS-Engine) PS2 and PS3
-text dumpers. The implementation here is new MIT-licensed, bounds-checked Java
+text dumpers. The implementation here is new GPL-3.0 bounds-checked Java
 code; no proprietary CMVS runtime or game data is included. Android builds run
 only in CI.
+
+## Licence
+
+GPL-3.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). The code here is ours (the CPZ reader is a port of MIT-licensed GARbro code, notice in LICENSE.GARbro); the third-party attributions in NOTICE and THIRD_PARTY.md keep their own notices.
