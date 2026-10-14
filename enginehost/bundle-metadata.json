@@ -41,6 +41,6 @@
     "revision": "format-research"
   },
   "licenses": [
-    "MIT"
+    "GPL-3.0", "MIT (the GARbro CPZ port; notice in LICENSE.GARbro)"
   ]
 }
