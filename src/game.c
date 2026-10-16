@@ -150,9 +150,12 @@ static void collect_archives(cmvs_game *g)
     struct dirent *e;
 
     if (g->broker) {
-        char names[CMVS_BROKER_LIST_MAX][256];
+        /* On the heap: a 256 KB array on the stack overflows the 1 MB binder
+           thread a sandboxed runtime steps on. */
+        char (*names)[256] = malloc((size_t) CMVS_BROKER_LIST_MAX * sizeof *names);
         char listed[1024];
         int total, i;
+        if (!names) return;
         snprintf(listed, sizeof listed, "%s", g->pack_rel);
         /* The broker's own list() takes a plain relative path, without the
            trailing slash a real opendir() would not need either. */
@@ -168,6 +171,7 @@ static void collect_archives(cmvs_game *g)
             snprintf(g->archive_name[g->archives], sizeof g->archive_name[0], "%s", names[i]);
             g->archives++;
         }
+        free(names);
     } else {
         DIR *d = opendir(g->pack);
         if (!d) return;
@@ -440,15 +444,19 @@ static void index_folder(cmvs_game *g, const char *path, int depth)
  */
 static void index_folder_broker(cmvs_game *g, const char *relpath, int depth)
 {
-    char names[CMVS_BROKER_LIST_MAX][256];
+    /* Both listings are 1024 x 256 bytes: held on the heap, one pair per
+       level, because four levels of them on the stack (2 MB) overflow the
+       1 MB binder thread a sandboxed runtime steps on, which killed every
+       ChronoClock launch with SIGSEGV in the isolated runtime. */
+    char (*names)[256] = malloc((size_t) CMVS_BROKER_LIST_MAX * sizeof *names);
+    char (*sub)[256] = malloc((size_t) CMVS_BROKER_LIST_MAX * sizeof *sub);
     int total, i;
 
-    if (depth > 3) return;
+    if (depth > 3 || !names || !sub) { free(names); free(sub); return; }
     total = g->broker->list(g->broker->ctx, relpath, names, CMVS_BROKER_LIST_MAX);
-    if (total <= 0) return;
+    if (total <= 0) { free(names); free(sub); return; }
     for (i = 0; i < total; i++) {
         char child[1600];
-        char sub[CMVS_BROKER_LIST_MAX][256];
         if (relpath[0]) snprintf(child, sizeof child, "%s/%s", relpath, names[i]);
         else snprintf(child, sizeof child, "%s", names[i]);
         if (g->broker->list(g->broker->ctx, child, sub, CMVS_BROKER_LIST_MAX) > 0) {
@@ -457,6 +465,8 @@ static void index_folder_broker(cmvs_game *g, const char *relpath, int depth)
             loose_add(g, names[i], child);
         }
     }
+    free(names);
+    free(sub);
 }
 
 static void index_loose(cmvs_game *g)
