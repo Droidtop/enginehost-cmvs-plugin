@@ -1,0 +1,9 @@
+{
+  "upstream": {
+    "repo": "Droidtop/enginehost-cmvs-plugin",
+    "ref": "engine/2.0-3.0",
+    "commit": "6200a8de1e6455b449f6ee151250e7a20e6dd14e",
+    "basedOn": "Droidtop/enginehost-cmvs-plugin 0885e663be30a0d93326abbdc196b0d41c0411da (main 0885e66)"
+  },
+  "version": "3.0"
+}

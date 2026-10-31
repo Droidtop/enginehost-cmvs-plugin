@@ -1,0 +1,9 @@
+CMVS plugin for Enginehost
+Copyright the Enginehost contributors. Licensed under the GNU General Public License, version 3 (LICENSE).
+
+The runtime is new Java written for Enginehost. Two projects informed it:
+
+- xmoezzz/CMVS-Engine (MIT): the PS2 and PS3 text-dumper format information; no source is included.
+- morkt/GARbro (MIT): CmvsArchive.java, CmvsMd5.java and CmvsScheme.java are a Java port of GARbro's
+  ArcFormats/Cmvs sources and of the encryption scheme it records. GARbro's licence, which requires its
+  notice to travel with the port, is in LICENSE.GARbro. MIT allows the combined work to be GPL-3.0.

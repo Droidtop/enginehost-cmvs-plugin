@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "capabilities": [
+    {
+      "id": "cmvs-ps2-ps3-dialogue",
+      "engineContext": "ps2",
+      "runtimeVersion": "2.0"
+    },
+    {
+      "id": "cmvs-ps2-ps3-dialogue",
+      "engineContext": "ps3",
+      "runtimeVersion": "3.0"
+    }
+  ]
+}
