@@ -9,6 +9,12 @@ release of its own (`<bundle>-build.<run>`), which is never overwritten.
 
 ## [Unreleased]
 
+### Fixed
+
+- 1.0.6: text in the Japanese face the core finds on the console (Noto Sans CJK) sits on its em
+  square, as MS Gothic does on Windows, instead of a quarter em low in its box
+  (Droidtop/tracker#853).
+
 ### Added
 
 - A permanent, never-overwritten release for every bundle build published
