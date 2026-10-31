@@ -198,11 +198,31 @@ static float scale_for(cmvs_font *f, int size)
     return stbtt_ScaleForMappingEmToPixels(&f->info, (float) size);
 }
 
+/*
+ * How far the em square's top sits above the baseline, in font units. A CJK
+ * face marks its em square with OS/2 typo metrics that add up to the em, and
+ * that square is the cell a Japanese Windows face fills (MS Gothic: ascent
+ * 0.859 em). Its hhea ascent is a taller figure (Noto Sans CJK: typo 880/-120,
+ * hhea 1160/-288 per 1000), and placing glyphs on it put them a quarter em
+ * below their cells (Droidtop/tracker#853, the same placement in KiriKiri cut
+ * descenders off). Any other face keeps its hhea ascent.
+ */
+static int em_ascent(const stbtt_fontinfo *info)
+{
+    int ascent, descent, gap, units;
+    units = (int) (1.0f / stbtt_ScaleForMappingEmToPixels(info, 1.0f) + 0.5f);
+    if (stbtt_GetFontVMetricsOS2(info, &ascent, &descent, &gap) &&
+        ascent > 0 && ascent - descent == units)
+        return ascent;
+    stbtt_GetFontVMetrics(info, &ascent, &descent, &gap);
+    return ascent;
+}
+
 const uint8_t *cmvs_font_glyph(cmvs_font *f, unsigned code, int size, int cell,
                                int *w, int *h, int *left, int *top)
 {
     float scale, wide;
-    int glyph, x0, y0, x1, y1, ascent, descent, gap, advance = 0, bearing = 0;
+    int glyph, x0, y0, x1, y1, advance = 0, bearing = 0;
     uint8_t *bitmap;
 
     if (w) *w = 0;
@@ -230,12 +250,10 @@ const uint8_t *cmvs_font_glyph(cmvs_font *f, unsigned code, int size, int cell,
     if (f->glyph) stbtt_FreeBitmap(f->glyph, NULL);
     f->glyph = bitmap;
 
-    stbtt_GetFontVMetrics(&f->info, &ascent, &descent, &gap);
-    (void) gap;
     if (left) *left = x0;
     /* y0 is measured up from the baseline; the caller works from the top of
      * the line box, which is where the em square starts. */
-    if (top) *top = (int) (ascent * scale + 0.5f) + y0;
+    if (top) *top = (int) (em_ascent(&f->info) * scale + 0.5f) + y0;
     return bitmap;
 }
 
